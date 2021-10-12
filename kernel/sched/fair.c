@@ -26,13 +26,21 @@
 #include <trace/hooks/sched.h>
 
 /*
+ * sysctl_sched_latency可以理解为在这么长的时间里保证cpu rq上的每个task都有机会运行至少一次。nr_running个task运行一次可以认为是一个周期（sched period或者sched slice）。
+ * 换句话理解就是一个task在一个周期里肯定会被调度到一次，也就是这个task最多等待这个延迟时间。
+ * 但slice随rq的nr_running来变化的。如果nr_running > sched_nr_latency,则slice = nr_running * sysctl_sched_min_granularity，否则slice = sysctl_sched_latency。
+ * sysctl_sched_min_granularity可以理解为在一个周期里每个task至少运行这么长时间后才能被抢占。
+ * sched_nr_latency = sysctl_sched_latency/sysctl_sched_min_granularity，可以理解为人为设定的一个周期里最多运行的task数量。
+ */
+
+/*
  * Targeted preemption latency for CPU-bound tasks:
  *
  * NOTE: this latency value is not the same as the concept of
  * 'timeslice length' - timeslices in CFS are of variable length
  * and have no persistent notion like in traditional, time-slice
  * based scheduling concepts.
- *
+ * 注意，这个sched latency不是平常所说的时间片的概念，cfs里面没有固定的时间片。
  * (to see the precise effective timeslice length of your workload,
  *  run vmstat and monitor the context-switches (cs) field)
  *
@@ -56,14 +64,19 @@ enum sched_tunable_scaling sysctl_sched_tunable_scaling = SCHED_TUNABLESCALING_L
 
 /*
  * Minimal preemption granularity for CPU-bound tasks:
- *
  * (default: 0.75 msec * (1 + ilog(ncpus)), units: nanoseconds)
+ * 意思是说对于cpu-bound task，只有不是主动sleep或者等锁而放弃cpu，则至少得跑sched_min_granularity的时长后才能被抢占？
+ * 表示调度的最小粒度，如果调度的时间间隔小于这个时间段，内核是不会挑选其他sched_entity进行调度
+ * sched_tick中，应该判断当前运行的sched_entity的运行时间是否超过了sysctl_sched_min_granularity。
+ * 如果未超过，就表示当前sched_entity还需要继续运行,如果超过了，可能会考虑让wakeup的sched_entity抢占调度。
  */
 unsigned int sysctl_sched_min_granularity			= 750000ULL;
 static unsigned int normalized_sysctl_sched_min_granularity	= 750000ULL;
 
 /*
  * This value is kept at sysctl_sched_latency/sysctl_sched_min_granularity
+ * nr_latency是延迟时间段能最大处理任务的数量，在这段时间点有可能切换进程，这几个时间点就是当一个sched_entity运行时间超过了sysctl_sched_min_granularity，那么就可以考虑切换进程了。
+ * 这样如果每次都切换进程，那么延迟时间段内最大处理任务的数量就是nr_latency
  */
 static unsigned int sched_nr_latency = 8;
 
@@ -669,12 +682,17 @@ static inline u64 calc_delta_fair(u64 delta, struct sched_entity *se)
 }
 
 /*
+ * 如果当前可以运行的sched_entity的个数超过了sched_nr_latency，那么认为在sysctl_sched_latency的一段时间内调度所有的sched_entity时间不够，
+ * 这时候需要按照nr_running的个数，扩大调度周期的时长(nr_running * sysctl_sched_min_granularity)。
+ * tick中断函数会调用scheduler_tick，最终调用了cfs中的check_preempt_tick，
+ * 检测当前调度的sched_entity是否需要被抢占，需要调度其他的sched_entity。
  * The idea is to set a period in which each task runs once.
- *
+ * __sched_period函数是计算调度一轮所有的sched_entity所需要的时间
  * When there are too many tasks (sched_nr_latency) we have to stretch
  * this period because otherwise the slices get too small.
  *
  * p = (nr <= nl) ? l : l*nr/nl
+ * p:调度周期，nr:nr_running, nl:sched_nr_latency, l:sysctl_sched_latency, l/nl:sysctl_sched_min_granularity
  */
 static u64 __sched_period(unsigned long nr_running)
 {
@@ -692,7 +710,7 @@ static u64 __sched_period(unsigned long nr_running)
  */
 static u64 sched_slice(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
-	u64 slice = __sched_period(cfs_rq->nr_running + !se->on_rq);
+	u64 slice = __sched_period(cfs_rq->nr_running + !se->on_rq);//获得总的运行时间段，这个时间有可能比sysctl_sched_latency要大
 
 	for_each_sched_entity(se) {
 		struct load_weight *load;
@@ -701,12 +719,17 @@ static u64 sched_slice(struct cfs_rq *cfs_rq, struct sched_entity *se)
 		cfs_rq = cfs_rq_of(se);
 		load = &cfs_rq->load;
 
-		if (unlikely(!se->on_rq)) {
+		if (unlikely(!se->on_rq)) {//如果se不在rq中，说明rq中的load不包括se的load，这个时候需要把se的load加到rq上
 			lw = cfs_rq->load;
 
 			update_load_add(&lw, se->load.weight);
 			load = &lw;
 		}
+		/*
+		* static u64 __calc_delta(u64 delta_exec, unsigned long weight, struct load_weight *lw)
+		* 该函数的的计算结果是：delta_exec * weight / lw.weight
+		* 根据slice是一轮调度总的时间，load是rq总的load，se->load.weight是se的load，这样就可以算出load占总load的百分比，然后体现在平分slice上
+		*/
 		slice = __calc_delta(slice, se->load.weight, load);
 	}
 	return slice;
