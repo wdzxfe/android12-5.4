@@ -2916,41 +2916,6 @@ static void __sched_fork(unsigned long clone_flags, struct task_struct *p)
 	init_numa_balancing(clone_flags, p);
 }
 
-DEFINE_STATIC_KEY_FALSE(sched_numa_balancing);
-
-#ifdef CONFIG_NUMA_BALANCING
-
-void set_numabalancing_state(bool enabled)
-{
-	if (enabled)
-		static_branch_enable(&sched_numa_balancing);
-	else
-		static_branch_disable(&sched_numa_balancing);
-}
-
-#ifdef CONFIG_PROC_SYSCTL
-int sysctl_numa_balancing(struct ctl_table *table, int write,
-			 void __user *buffer, size_t *lenp, loff_t *ppos)
-{
-	struct ctl_table t;
-	int err;
-	int state = static_branch_likely(&sched_numa_balancing);
-
-	if (write && !capable(CAP_SYS_ADMIN))
-		return -EPERM;
-
-	t = *table;
-	t.data = &state;
-	err = proc_dointvec_minmax(&t, write, buffer, lenp, ppos);
-	if (err < 0)
-		return err;
-	if (write)
-		set_numabalancing_state(state);
-	return err;
-}
-#endif
-#endif
-
 #ifdef CONFIG_SCHEDSTATS
 
 DEFINE_STATIC_KEY_FALSE(sched_schedstats);
@@ -6281,8 +6246,6 @@ void init_idle(struct task_struct *idle, int cpu)
 #endif
 }
 
-#ifdef CONFIG_SMP
-
 int cpuset_cpumask_can_shrink(const struct cpumask *cur,
 			      const struct cpumask *trial)
 {
@@ -6324,54 +6287,6 @@ out:
 }
 
 bool sched_smp_initialized __read_mostly;
-
-#ifdef CONFIG_NUMA_BALANCING
-/* Migrate current task p to target_cpu */
-int migrate_task_to(struct task_struct *p, int target_cpu)
-{
-	struct migration_arg arg = { p, target_cpu };
-	int curr_cpu = task_cpu(p);
-
-	if (curr_cpu == target_cpu)
-		return 0;
-
-	if (!cpumask_test_cpu(target_cpu, p->cpus_ptr))
-		return -EINVAL;
-
-	/* TODO: This is not properly updating schedstats */
-
-	trace_sched_move_numa(p, curr_cpu, target_cpu);
-	return stop_one_cpu(curr_cpu, migration_cpu_stop, &arg);
-}
-
-/*
- * Requeue a task on a given node and accurately track the number of NUMA
- * tasks on the runqueues
- */
-void sched_setnuma(struct task_struct *p, int nid)
-{
-	bool queued, running;
-	struct rq_flags rf;
-	struct rq *rq;
-
-	rq = task_rq_lock(p, &rf);
-	queued = task_on_rq_queued(p);
-	running = task_current(rq, p);
-
-	if (queued)
-		dequeue_task(rq, p, DEQUEUE_SAVE);
-	if (running)
-		put_prev_task(rq, p);
-
-	p->numa_preferred_nid = nid;
-
-	if (queued)
-		enqueue_task(rq, p, ENQUEUE_RESTORE | ENQUEUE_NOCLOCK);
-	if (running)
-		set_next_task(rq, p);
-	task_rq_unlock(rq, p, &rf);
-}
-#endif /* CONFIG_NUMA_BALANCING */
 
 #ifdef CONFIG_HOTPLUG_CPU
 /*
@@ -6730,13 +6645,6 @@ static int __init migration_init(void)
 	return 0;
 }
 early_initcall(migration_init);
-
-#else
-void __init sched_init_smp(void)
-{
-	sched_init_granularity();
-}
-#endif /* CONFIG_SMP */
 
 int in_sched_functions(unsigned long addr)
 {

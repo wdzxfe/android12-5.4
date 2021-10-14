@@ -1288,20 +1288,7 @@ this_rq_lock_irq(struct rq_flags *rf)
 	return rq;
 }
 
-#ifdef CONFIG_NUMA
-enum numa_topology_type {
-	NUMA_DIRECT,
-	NUMA_GLUELESS_MESH,
-	NUMA_BACKPLANE,
-};
-extern enum numa_topology_type sched_numa_topology_type;
-extern int sched_max_numa_distance;
-extern bool find_numa_distance(int distance);
-extern void sched_init_numa(void);
-extern void sched_domains_numa_masks_set(unsigned int cpu);
-extern void sched_domains_numa_masks_clear(unsigned int cpu);
-extern int sched_numa_find_closest(const struct cpumask *cpus, int cpu);
-#else
+
 static inline void sched_init_numa(void) { }
 static inline void sched_domains_numa_masks_set(unsigned int cpu) { }
 static inline void sched_domains_numa_masks_clear(unsigned int cpu) { }
@@ -1309,27 +1296,7 @@ static inline int sched_numa_find_closest(const struct cpumask *cpus, int cpu)
 {
 	return nr_cpu_ids;
 }
-#endif
-
-#ifdef CONFIG_NUMA_BALANCING
-/* The regions in numa_faults array from task_struct */
-enum numa_faults_stats {
-	NUMA_MEM = 0,
-	NUMA_CPU,
-	NUMA_MEMBUF,
-	NUMA_CPUBUF
-};
-extern void sched_setnuma(struct task_struct *p, int node);
-extern int migrate_task_to(struct task_struct *p, int cpu);
-extern int migrate_swap(struct task_struct *p, struct task_struct *t,
-			int cpu, int scpu);
-extern void init_numa_balancing(unsigned long clone_flags, struct task_struct *p);
-#else
-static inline void
-init_numa_balancing(unsigned long clone_flags, struct task_struct *p)
-{
-}
-#endif /* CONFIG_NUMA_BALANCING */
+static inline void init_numa_balancing(unsigned long clone_flags, struct task_struct *p) { }
 
 #ifdef CONFIG_SMP
 
