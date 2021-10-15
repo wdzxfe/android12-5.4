@@ -232,7 +232,6 @@ static void __update_inv_weight(struct load_weight *lw)
  * 
  * 工具类函数，32bit下的算法比较简单易懂，64bit比较复杂，奇技淫巧。
  * 总之参数weight是作为基准的，ret / weight = delta_exec / lw.weight ==> ret = delta_exec * weight / lw.weight
- * 
  */
 static u64 __calc_delta(u64 delta_exec, unsigned long weight, struct load_weight *lw)
 {
@@ -260,13 +259,14 @@ static u64 __calc_delta(u64 delta_exec, unsigned long weight, struct load_weight
 }
 
 
-const struct sched_class fair_sched_class;
+const struct sched_class fair_sched_class; //有何用处？
 
 /**************************************************************
  * CFS operations on generic schedulable entities:
  */
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
+/* 获取se所对应的task struct，注意如果se对应的是task group会告警！*/
 static inline struct task_struct *task_of(struct sched_entity *se)
 {
 	SCHED_WARN_ON(!entity_is_task(se));
@@ -277,9 +277,10 @@ static inline struct task_struct *task_of(struct sched_entity *se)
 #define for_each_sched_entity(se) \
 		for (; se; se = se->parent)
 
+/* 获取cfs task直接所在的cfs_rq */
 static inline struct cfs_rq *task_cfs_rq(struct task_struct *p)
 {
-	return p->se.cfs_rq;
+	return p->se.cfs_rq; //task_struct里没有rq的成员，需要se来中转一下。
 }
 
 /* runqueue on which this entity is (to be) queued */
@@ -287,16 +288,19 @@ static inline struct cfs_rq *cfs_rq_of(struct sched_entity *se)
 {
 	return se->cfs_rq;
 }
-
+/*
+ * 前面两个函数获取的是task或者se所在的cfs_rq
+ * 而group_cfs_rq()则是获取task group所拥有的cfs_rq, 即这些组内task所组成的cfs_rq。
+ */
 /* runqueue "owned" by this group */
 static inline struct cfs_rq *group_cfs_rq(struct sched_entity *grp)
 {
-	return grp->my_q;
+	return grp->my_q; //需要特别注意se里的cfs_rq和my_q的区别！！！
 }
 
 static inline void cfs_rq_tg_path(struct cfs_rq *cfs_rq, char *path, int len)
 {
-	if (!path)
+	if (!path) //需要往path里填充字符，所以不能是空指针。
 		return;
 
 	if (cfs_rq && task_group_is_autogroup(cfs_rq->tg))
@@ -451,68 +455,6 @@ find_matching_se(struct sched_entity **se, struct sched_entity **pse)
 		*pse = parent_entity(*pse);
 	}
 }
-
-#else	/* !CONFIG_FAIR_GROUP_SCHED */
-
-static inline struct task_struct *task_of(struct sched_entity *se)
-{
-	return container_of(se, struct task_struct, se);
-}
-
-#define for_each_sched_entity(se) \
-		for (; se; se = NULL)
-
-static inline struct cfs_rq *task_cfs_rq(struct task_struct *p)
-{
-	return &task_rq(p)->cfs;
-}
-
-static inline struct cfs_rq *cfs_rq_of(struct sched_entity *se)
-{
-	struct task_struct *p = task_of(se);
-	struct rq *rq = task_rq(p);
-
-	return &rq->cfs;
-}
-
-/* runqueue "owned" by this group */
-static inline struct cfs_rq *group_cfs_rq(struct sched_entity *grp)
-{
-	return NULL;
-}
-
-static inline void cfs_rq_tg_path(struct cfs_rq *cfs_rq, char *path, int len)
-{
-	if (path)
-		strlcpy(path, "(null)", len);
-}
-
-static inline bool list_add_leaf_cfs_rq(struct cfs_rq *cfs_rq)
-{
-	return true;
-}
-
-static inline void list_del_leaf_cfs_rq(struct cfs_rq *cfs_rq)
-{
-}
-
-static inline void assert_list_leaf_cfs_rq(struct rq *rq)
-{
-}
-
-#define for_each_leaf_cfs_rq_safe(rq, cfs_rq, pos)	\
-		for (cfs_rq = &rq->cfs, pos = NULL; cfs_rq; cfs_rq = pos)
-
-static inline struct sched_entity *parent_entity(struct sched_entity *se)
-{
-	return NULL;
-}
-
-static inline void
-find_matching_se(struct sched_entity **se, struct sched_entity **pse)
-{
-}
-
 #endif	/* CONFIG_FAIR_GROUP_SCHED */
 
 static __always_inline
