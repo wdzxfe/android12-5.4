@@ -103,42 +103,6 @@ static unsigned int normalized_sysctl_sched_wakeup_granularity	= 1000000UL;
 
 const_debug unsigned int sysctl_sched_migration_cost	= 500000UL;
 
-#ifdef CONFIG_SMP
-/*
- * For asym packing, by default the lower numbered CPU has higher priority.
- * core number越小优先级越高，task越容易往此cpu core上调度？
- */
-int __weak arch_asym_cpu_priority(int cpu)
-{
-	return -cpu;
-}
-/*
- * The margin used when comparing utilization with CPU capacity.
- *
- * (default: ~20%)
- * cap < max * 1024 / 1280
- */
-#define fits_capacity(cap, max)	((cap) * 1280 < (max) * 1024)
-#endif
-
-static inline void update_load_add(struct load_weight *lw, unsigned long inc)
-{
-	lw->weight += inc;
-	lw->inv_weight = 0;
-}
-
-static inline void update_load_sub(struct load_weight *lw, unsigned long dec)
-{
-	lw->weight -= dec;
-	lw->inv_weight = 0;
-}
-
-static inline void update_load_set(struct load_weight *lw, unsigned long w)
-{
-	lw->weight = w;
-	lw->inv_weight = 0;
-}
-
 /*
  * Increase the granularity value when there are more CPUs,
  * because with more CPUs the 'effective latency' as visible
@@ -190,6 +154,50 @@ void sched_init_granularity(void)
 	update_sysctl();
 }
 
+#ifdef CONFIG_SMP
+/*
+ * For asym packing, by default the lower numbered CPU has higher priority.
+ * core number越小优先级越高，task越容易往此cpu core上调度？
+ */
+int __weak arch_asym_cpu_priority(int cpu)
+{
+	return -cpu;
+}
+/*
+ * The margin used when comparing utilization with CPU capacity.
+ *
+ * (default: ~20%)
+ * cap < max * 1024 / 1280
+ */
+#define fits_capacity(cap, max)	((cap) * 1280 < (max) * 1024)
+#endif
+
+/*
+ * 下面是一些和load_weight相关的函数。因为单纯cfs task的load_weight和nice值直接相关（一般不会有add/sub/set操作），其weight和inv_weight值
+ * 已经通过prio_to_weight[40]和prio_to_wmult[40]这两个数组预定义好了，无需更新。所以，下面这些函数是作用于cfs_rq和task group里的load_weight.
+ */
+
+/*
+ * 下面3个函数只是设置了lw的weight，并没有马上更新inv_weight。只是在需要更新inv_weight时再去更新，避免浪费CPU MIPS。
+ */
+static inline void update_load_add(struct load_weight *lw, unsigned long inc)
+{
+	lw->weight += inc;
+	lw->inv_weight = 0;
+}
+
+static inline void update_load_sub(struct load_weight *lw, unsigned long dec)
+{
+	lw->weight -= dec;
+	lw->inv_weight = 0;
+}
+
+static inline void update_load_set(struct load_weight *lw, unsigned long w)
+{
+	lw->weight = w;
+	lw->inv_weight = 0;
+}
+
 #define WMULT_CONST	(~0U)
 #define WMULT_SHIFT	32
 
@@ -197,7 +205,7 @@ static void __update_inv_weight(struct load_weight *lw)
 {
 	unsigned long w;
 
-	if (likely(lw->inv_weight))
+	if (likely(lw->inv_weight)) //lw->weight更新后，inv_weight就会清零。避免重复更新。
 		return;
 
 	w = scale_load_down(lw->weight);
@@ -207,7 +215,7 @@ static void __update_inv_weight(struct load_weight *lw)
 	else if (unlikely(!w))
 		lw->inv_weight = WMULT_CONST;
 	else
-		lw->inv_weight = WMULT_CONST / w;
+		lw->inv_weight = WMULT_CONST / w; //前面两个是特殊情况，这个是最常见的，对于32bit就是inv_weight=2^32/weight
 }
 
 /*
@@ -221,6 +229,10 @@ static void __update_inv_weight(struct load_weight *lw)
  *
  * Or, weight =< lw.weight (because lw.weight is the runqueue weight), thus
  * weight/lw.weight <= 1, and therefore our shift will also be positive.
+ * 
+ * 工具类函数，32bit下的算法比较简单易懂，64bit比较复杂，奇技淫巧。
+ * 总之参数weight是作为基准的，ret / weight = delta_exec / lw.weight ==> ret = delta_exec * weight / lw.weight
+ * 
  */
 static u64 __calc_delta(u64 delta_exec, unsigned long weight, struct load_weight *lw)
 {

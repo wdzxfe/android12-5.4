@@ -6617,7 +6617,7 @@ int sched_cpu_dying(unsigned int cpu)
 
 void __init sched_init_smp(void)
 {
-	sched_init_numa();
+	sched_init_numa(); //空函数，直接忽略
 
 	/*
 	 * There's no userspace yet to cause hotplug operations; hence all the
