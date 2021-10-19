@@ -154,6 +154,30 @@ void sched_init_granularity(void)
 	update_sysctl();
 }
 
+int sched_proc_update_handler(struct ctl_table *table, int write,
+		void __user *buffer, size_t *lenp,
+		loff_t *ppos)
+{
+	int ret = proc_dointvec_minmax(table, write, buffer, lenp, ppos);
+	unsigned int factor = get_update_sysctl_factor();
+
+	if (ret || !write)
+		return ret;
+
+	sched_nr_latency = DIV_ROUND_UP(sysctl_sched_latency,
+					sysctl_sched_min_granularity);
+
+#define WRT_SYSCTL(name) \
+	(normalized_sysctl_##name = sysctl_##name / (factor))
+	WRT_SYSCTL(sched_min_granularity);
+	WRT_SYSCTL(sched_latency);
+	WRT_SYSCTL(sched_wakeup_granularity);
+#undef WRT_SYSCTL
+
+	return 0;
+}
+#endif
+
 #ifdef CONFIG_SMP
 /*
  * For asym packing, by default the lower numbered CPU has higher priority.
@@ -173,8 +197,9 @@ int __weak arch_asym_cpu_priority(int cpu)
 #endif
 
 /*
- * 下面是一些和load_weight相关的函数。因为单纯cfs task的load_weight和nice值直接相关（一般不会有add/sub/set操作），其weight和inv_weight值
- * 已经通过prio_to_weight[40]和prio_to_wmult[40]这两个数组预定义好了，无需更新。所以，下面这些函数是作用于cfs_rq和task group里的load_weight.
+ * 下面是一些和load_weight相关的函数。因为单纯cfs task的load_weight和nice值直接相关（一般不会有add/sub/set操作），
+ * 其weight和inv_weight值已经通过sched_prio_to_weight[40]和sched_prio_to_wmult[40]这两个数组预定义好了，无需更新。
+ * 所以，下面这些函数是作用于cfs_rq和task group里的load_weight.
  */
 
 /*
@@ -231,7 +256,8 @@ static void __update_inv_weight(struct load_weight *lw)
  * weight/lw.weight <= 1, and therefore our shift will also be positive.
  * 
  * 工具类函数，32bit下的算法比较简单易懂，64bit比较复杂，奇技淫巧。
- * 总之参数weight是作为基准的，ret / weight = delta_exec / lw.weight ==> ret = delta_exec * weight / lw.weight
+ * 总之参数weight是作为基准的，delta_exec和lw.weight是一对，将delta_exec以weight为基准来折算。
+ * ret / weight = delta_exec / lw.weight ==> ret = delta_exec * weight / lw.weight
  */
 static u64 __calc_delta(u64 delta_exec, unsigned long weight, struct load_weight *lw)
 {
@@ -410,22 +436,19 @@ static inline void assert_list_leaf_cfs_rq(struct rq *rq)
 				 leaf_cfs_rq_list)
 
 /* Do the two (enqueued) entities belong to the same group ? */
-static inline struct cfs_rq *
-is_same_group(struct sched_entity *se, struct sched_entity *pse)
+static inline struct cfs_rq *is_same_group(struct sched_entity *se, struct sched_entity *pse)
 {
 	if (se->cfs_rq == pse->cfs_rq)
 		return se->cfs_rq;
-
 	return NULL;
 }
 
 static inline struct sched_entity *parent_entity(struct sched_entity *se)
 {
-	return se->parent;
+	return se->parent; //parent为空，则代表该se直接挂在cpu的rq上。
 }
 
-static void
-find_matching_se(struct sched_entity **se, struct sched_entity **pse)
+static void find_matching_se(struct sched_entity **se, struct sched_entity **pse)
 {
 	int se_depth, pse_depth;
 
@@ -463,17 +486,16 @@ void account_cfs_rq_runtime(struct cfs_rq *cfs_rq, u64 delta_exec);
 /**************************************************************
  * Scheduling class tree data structure manipulation methods:
  */
-
-static inline u64 max_vruntime(u64 max_vruntime, u64 vruntime)
+/*不就是返回最大值和最小值吗？为什么还要单独搞两个函数？max()和min()不行吗？*/
+static inline u64 max_vruntime(u64 max_vruntime, u64 vruntime) //等效: max(max_vruntime,vruntime)
 {
-	s64 delta = (s64)(vruntime - max_vruntime);
+	s64 delta = (s64)(vruntime - max_vruntime);//为什么不直接比较呢？是减法效率更高？
 	if (delta > 0)
 		max_vruntime = vruntime;
-
 	return max_vruntime;
 }
 
-static inline u64 min_vruntime(u64 min_vruntime, u64 vruntime)
+static inline u64 min_vruntime(u64 min_vruntime, u64 vruntime) //等效: min(min_vruntime, vruntime)
 {
 	s64 delta = (s64)(vruntime - min_vruntime);
 	if (delta < 0)
@@ -481,13 +503,18 @@ static inline u64 min_vruntime(u64 min_vruntime, u64 vruntime)
 
 	return min_vruntime;
 }
-
-static inline int entity_before(struct sched_entity *a,
-				struct sched_entity *b)
+/*
+ * 返回1：a的vruntime少；返回0：a的vruntime大。
+ */
+static inline int entity_before(struct sched_entity *a, struct sched_entity *b)
 {
 	return (s64)(a->vruntime - b->vruntime) < 0;
 }
-
+/*
+ * 更新cfs_rq的vruntime。要么是cfs_rq->curr，要么是cfs_rq rbtree最左端se的vruntime最小值。
+ * 但为了保证min_vruntime的单调递增，只有当前面二者比较得到的最小值大于此刻的cfs_rq->min_vruntime才进行更新。
+ * 所以，cfs_rq上的task可以小于min_vruntime, min_vruntime只是用于task创建或迁移到该cfs_rq时更新这个task的vruntime吗？
+ */
 static void update_min_vruntime(struct cfs_rq *cfs_rq)
 {
 	struct sched_entity *curr = cfs_rq->curr;
@@ -504,7 +531,7 @@ static void update_min_vruntime(struct cfs_rq *cfs_rq)
 
 	if (leftmost) { /* non-empty tree */
 		struct sched_entity *se;
-		se = rb_entry(leftmost, struct sched_entity, run_node);
+		se = rb_entry(leftmost, struct sched_entity, run_node);//获取rbtree最左端叶子对应的se
 
 		if (!curr)
 			vruntime = se->vruntime;
@@ -512,16 +539,19 @@ static void update_min_vruntime(struct cfs_rq *cfs_rq)
 			vruntime = min_vruntime(vruntime, se->vruntime);
 	}
 
-	/* ensure we never gain time by being placed backwards. */
+	/* ensure we never gain time by being placed backwards.
+	 * min_vruntime要求是单调递增的，所以需要取max。
+	 */
 	cfs_rq->min_vruntime = max_vruntime(cfs_rq->min_vruntime, vruntime);
 #ifndef CONFIG_64BIT
 	smp_wmb();
-	cfs_rq->min_vruntime_copy = cfs_rq->min_vruntime;
+	cfs_rq->min_vruntime_copy = cfs_rq->min_vruntime; //min_vruntime_copy有什么用？
 #endif
 }
 
 /*
  * Enqueue an entity into the rb-tree:
+ * 根据se->vruntime插入到cfs_rq的rbtree合适位置。
  */
 static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
@@ -552,70 +582,40 @@ static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	rb_insert_color_cached(&se->run_node,
 			       &cfs_rq->tasks_timeline, leftmost);
 }
-
+/* 从cfs_rq rbtree删掉se */
 static void __dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 	rb_erase_cached(&se->run_node, &cfs_rq->tasks_timeline);
 }
-
+/* 取rbtree最左端的se */
 struct sched_entity *__pick_first_entity(struct cfs_rq *cfs_rq)
 {
 	struct rb_node *left = rb_first_cached(&cfs_rq->tasks_timeline);
 
-	if (!left)
-		return NULL;
-
+	if (!left) return NULL;
 	return rb_entry(left, struct sched_entity, run_node);
 }
-
+/* 简而言之，就是找到vruntime比se->vruntime大的下一个se */
 static struct sched_entity *__pick_next_entity(struct sched_entity *se)
 {
 	struct rb_node *next = rb_next(&se->run_node);
 
-	if (!next)
-		return NULL;
-
+	if (!next) return NULL;
 	return rb_entry(next, struct sched_entity, run_node);
 }
 
 #ifdef CONFIG_SCHED_DEBUG
 struct sched_entity *__pick_last_entity(struct cfs_rq *cfs_rq)
 {
-	struct rb_node *last = rb_last(&cfs_rq->tasks_timeline.rb_root);
+	struct rb_node *last = rb_last(&cfs_rq->tasks_timeline.rb_root);//最右端的node？
 
-	if (!last)
-		return NULL;
-
+	if (!last) return NULL;
 	return rb_entry(last, struct sched_entity, run_node);
 }
 
 /**************************************************************
  * Scheduling class statistics methods:
  */
-
-int sched_proc_update_handler(struct ctl_table *table, int write,
-		void __user *buffer, size_t *lenp,
-		loff_t *ppos)
-{
-	int ret = proc_dointvec_minmax(table, write, buffer, lenp, ppos);
-	unsigned int factor = get_update_sysctl_factor();
-
-	if (ret || !write)
-		return ret;
-
-	sched_nr_latency = DIV_ROUND_UP(sysctl_sched_latency,
-					sysctl_sched_min_granularity);
-
-#define WRT_SYSCTL(name) \
-	(normalized_sysctl_##name = sysctl_##name / (factor))
-	WRT_SYSCTL(sched_min_granularity);
-	WRT_SYSCTL(sched_latency);
-	WRT_SYSCTL(sched_wakeup_granularity);
-#undef WRT_SYSCTL
-
-	return 0;
-}
-#endif
 
 /*
  * delta /= w
