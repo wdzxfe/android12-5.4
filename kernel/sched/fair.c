@@ -662,7 +662,14 @@ static u64 sched_slice(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	 * 获得总的运行时间段，这个时间有可能比sysctl_sched_latency要大
 	 */
 	u64 slice = __sched_period(cfs_rq->nr_running + !se->on_rq);
-
+	/*
+	 * 对这里for loop的一点理解：
+	 * 1. 前面获取的slice是根据se直接所在的cfs_rq获得的理想调度周期时间，但是对应cpu rq而言，
+	 * 这个cfs_rq或许是直接挂在cpu rq下的cfs_rq，即se直接是个task，其parent为NULL；
+	 * 亦或仅仅是多层嵌套下的某级se的cfs_rq，那这个for loop的意义就是逐层折算到相对于最顶层的cfs_rq时，
+	 * se所能分到的调度时长。
+	 * 2. 所以一个task如果嵌套很深，其分到的运行时间片会相当小。
+	 */
 	for_each_sched_entity(se) {
 		struct load_weight *load;
 		struct load_weight lw;
@@ -693,6 +700,7 @@ static u64 sched_slice(struct cfs_rq *cfs_rq, struct sched_entity *se)
  * We calculate the vruntime slice of a to-be-inserted task.
  *
  * vs = s/w
+ * sched_slice(cfs_rq, se)获取的slice是wall time，这里根据se的权重将其转换为类似vruntime的vslice
  */
 static u64 sched_vslice(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
@@ -700,7 +708,6 @@ static u64 sched_vslice(struct cfs_rq *cfs_rq, struct sched_entity *se)
 }
 
 #include "pelt.h"
-#ifdef CONFIG_SMP
 
 static int select_idle_sibling(struct task_struct *p, int prev_cpu, int cpu);
 static unsigned long task_h_load(struct task_struct *p);
@@ -718,11 +725,17 @@ void init_entity_runnable_average(struct sched_entity *se)
 	 * they get a chance to stabilize to their real load level.
 	 * Group entities are initialized with zero load to reflect the fact that
 	 * nothing has been attached to the task group yet.
+	 * task的话初始化为heavy load，task group的话初始化为0。因为前面通过memset将sa初始化为0，
+	 * 所以这里只对task类型的sa进行处理即可。
+	 */
+	/*
+	 * 对应task而言，其sa->load_avg = runnable% * scale_load_down(load)
+	 * 因为要给task的sa初始化heavy load，所以这里直接赋予了最大值，即runnable% = 100%
 	 */
 	if (entity_is_task(se))
 		sa->runnable_load_avg = sa->load_avg = scale_load_down(se->load.weight);
 
-	se->runnable_weight = se->load.weight;
+	se->runnable_weight = se->load.weight; //对应task group而言，这两个值都是0.
 
 	/* when this task enqueue'ed, it will contribute to its cfs_rq's load_avg */
 }
@@ -730,20 +743,21 @@ void init_entity_runnable_average(struct sched_entity *se)
 static void attach_entity_cfs_rq(struct sched_entity *se);
 
 /*
- * With new tasks being created, their initial util_avgs are extrapolated
+ * With new tasks being created, their initial util_avgs are extrapolated(推测的)
  * based on the cfs_rq's current util_avg:
  *
  *   util_avg = cfs_rq->util_avg / (cfs_rq->load_avg + 1) * se.load.weight
+ * 即根据attach se和cfs_rq的权重来确定util_avg，认为相同权重的task有接近的util_avg，算是合理的推算。
  *
- * However, in many cases, the above util_avg does not give a desired
- * value. Moreover, the sum of the util_avgs may be divergent, such
- * as when the series is a harmonic series.
+ * However, in many cases, the above util_avg does not give a desired（想要的）
+ * value. Moreover, the sum of the util_avgs may be divergent（分散？）, such
+ * as when the series is a harmonic series（调和级数）.
  *
- * To solve this problem, we also cap the util_avg of successive tasks to
+ * To solve this problem, we also cap the util_avg of successive（连续的） tasks to
  * only 1/2 of the left utilization budget:
  *
  *   util_avg_cap = (cpu_scale - cfs_rq->avg.util_avg) / 2^n
- *
+ * 即剩余cpu cap的一半作为新attach的task util_avg，感觉这个2^n很容易让人产生歧义啊。
  * where n denotes the nth task and cpu_scale the CPU capacity.
  *
  * For example, for a CPU with 1024 of capacity, a simplest series from
@@ -764,18 +778,18 @@ void post_init_entity_util_avg(struct task_struct *p)
 	long cap = (long)(cpu_scale - cfs_rq->avg.util_avg) / 2;
 
 	if (cap > 0) {
-		if (cfs_rq->avg.util_avg != 0) {
+		if (cfs_rq->avg.util_avg != 0) { //cfs_rq有runnable and blocked se。
 			sa->util_avg  = cfs_rq->avg.util_avg * se->load.weight;
 			sa->util_avg /= (cfs_rq->avg.load_avg + 1);
 
 			if (sa->util_avg > cap)
 				sa->util_avg = cap;
-		} else {
+		} else { //cfs_rq没有runnable and blocked se，sa->util_avg直接等于cap。
 			sa->util_avg = cap;
 		}
 	}
 
-	if (p->sched_class != &fair_sched_class) {
+	if (p->sched_class != &fair_sched_class) { //为什么会出现非fair task？
 		/*
 		 * For !fair tasks do:
 		 *
@@ -792,18 +806,6 @@ void post_init_entity_util_avg(struct task_struct *p)
 
 	attach_entity_cfs_rq(se);
 }
-
-#else /* !CONFIG_SMP */
-void init_entity_runnable_average(struct sched_entity *se)
-{
-}
-void post_init_entity_util_avg(struct task_struct *p)
-{
-}
-static void update_tg_load_avg(struct cfs_rq *cfs_rq, int force)
-{
-}
-#endif /* CONFIG_SMP */
 
 /*
  * Update the current task's runtime statistics.
@@ -1109,7 +1111,6 @@ account_entity_dequeue(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	*ptr -= min_t(typeof(*ptr), *ptr, _val);		\
 } while (0)
 
-#ifdef CONFIG_SMP
 static inline void
 enqueue_runnable_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
@@ -1142,16 +1143,6 @@ dequeue_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	sub_positive(&cfs_rq->avg.load_avg, se->avg.load_avg);
 	sub_positive(&cfs_rq->avg.load_sum, se_weight(se) * se->avg.load_sum);
 }
-#else
-static inline void
-enqueue_runnable_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *se) { }
-static inline void
-dequeue_runnable_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *se) { }
-static inline void
-enqueue_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *se) { }
-static inline void
-dequeue_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *se) { }
-#endif
 
 static void reweight_entity(struct cfs_rq *cfs_rq, struct sched_entity *se,
 			    unsigned long weight, unsigned long runnable)
@@ -1367,15 +1358,8 @@ static void update_cfs_group(struct sched_entity *se)
 	if (throttled_hierarchy(gcfs_rq))
 		return;
 
-#ifndef CONFIG_SMP
-	runnable = shares = READ_ONCE(gcfs_rq->tg->shares);
-
-	if (likely(se->load.weight == shares))
-		return;
-#else
 	shares   = calc_group_shares(gcfs_rq);
 	runnable = calc_group_runnable(gcfs_rq, shares);
-#endif
 
 	reweight_entity(cfs_rq_of(se), se, shares, runnable);
 }
@@ -1409,7 +1393,6 @@ static inline void cfs_rq_util_change(struct cfs_rq *cfs_rq, int flags)
 	}
 }
 
-#ifdef CONFIG_SMP
 #ifdef CONFIG_FAIR_GROUP_SCHED
 /**
  * update_tg_load_avg - update the tg's load avg
@@ -2137,39 +2120,6 @@ static inline void update_misfit_status(struct task_struct *p, struct rq *rq)
 	rq->misfit_task_load = max_t(unsigned long, task_h_load(p), 1);
 }
 
-#else /* CONFIG_SMP */
-
-#define UPDATE_TG	0x0
-#define SKIP_AGE_LOAD	0x0
-#define DO_ATTACH	0x0
-
-static inline void update_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *se, int not_used1)
-{
-	cfs_rq_util_change(cfs_rq, 0);
-}
-
-static inline void remove_entity_load_avg(struct sched_entity *se) {}
-
-static inline void
-attach_entity_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags) {}
-static inline void
-detach_entity_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *se) {}
-
-static inline int idle_balance(struct rq *rq, struct rq_flags *rf)
-{
-	return 0;
-}
-
-static inline void
-util_est_enqueue(struct cfs_rq *cfs_rq, struct task_struct *p) {}
-
-static inline void
-util_est_dequeue(struct cfs_rq *cfs_rq, struct task_struct *p,
-		 bool task_sleep) {}
-static inline void update_misfit_status(struct task_struct *p, struct rq *rq) {}
-
-#endif /* CONFIG_SMP */
-
 static void check_spread(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 #ifdef CONFIG_SCHED_DEBUG
@@ -2721,7 +2671,6 @@ static inline void hrtick_update(struct rq *rq)
 }
 #endif
 
-#ifdef CONFIG_SMP
 static inline unsigned long cpu_util(int cpu);
 
 static inline bool cpu_overutilized(int cpu)
@@ -2736,9 +2685,6 @@ static inline void update_overutilized_status(struct rq *rq)
 		trace_sched_overutilized_tp(rq->rd, SG_OVERUTILIZED);
 	}
 }
-#else
-static inline void update_overutilized_status(struct rq *rq) { }
-#endif
 
 /*
  * The enqueue_task method is called before nr_running is
@@ -8207,11 +8153,7 @@ __init void init_sched_fair_class(void)
 
 const struct sched_avg *sched_trace_cfs_rq_avg(struct cfs_rq *cfs_rq)
 {
-#ifdef CONFIG_SMP
 	return cfs_rq ? &cfs_rq->avg : NULL;
-#else
-	return NULL;
-#endif
 }
 EXPORT_SYMBOL_GPL(sched_trace_cfs_rq_avg);
 
@@ -8237,21 +8179,13 @@ EXPORT_SYMBOL_GPL(sched_trace_cfs_rq_cpu);
 
 const struct sched_avg *sched_trace_rq_avg_rt(struct rq *rq)
 {
-#ifdef CONFIG_SMP
 	return rq ? &rq->avg_rt : NULL;
-#else
-	return NULL;
-#endif
 }
 EXPORT_SYMBOL_GPL(sched_trace_rq_avg_rt);
 
 const struct sched_avg *sched_trace_rq_avg_dl(struct rq *rq)
 {
-#ifdef CONFIG_SMP
 	return rq ? &rq->avg_dl : NULL;
-#else
-	return NULL;
-#endif
 }
 EXPORT_SYMBOL_GPL(sched_trace_rq_avg_dl);
 
@@ -8273,10 +8207,6 @@ EXPORT_SYMBOL_GPL(sched_trace_rq_cpu);
 
 const struct cpumask *sched_trace_rd_span(struct root_domain *rd)
 {
-#ifdef CONFIG_SMP
 	return rd ? rd->span : NULL;
-#else
-	return NULL;
-#endif
 }
 EXPORT_SYMBOL_GPL(sched_trace_rd_span);
