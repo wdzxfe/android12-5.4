@@ -769,11 +769,13 @@ static void attach_entity_cfs_rq(struct sched_entity *se);
  * Finally, that extrapolated util_avg is clamped to the cap (util_avg_cap)
  * if util_avg > util_avg_cap.
  */
+
 void post_init_entity_util_avg(struct task_struct *p)
 {
 	struct sched_entity *se = &p->se;
 	struct cfs_rq *cfs_rq = cfs_rq_of(se);
 	struct sched_avg *sa = &se->avg;
+	/* 疑问： new task还没有被加入到某个task group？不然下面获取cpu_scale必然会出现错误啊 */
 	long cpu_scale = arch_scale_cpu_capacity(cpu_of(rq_of(cfs_rq)));
 	long cap = (long)(cpu_scale - cfs_rq->avg.util_avg) / 2;
 
@@ -789,7 +791,10 @@ void post_init_entity_util_avg(struct task_struct *p)
 		}
 	}
 
-	if (p->sched_class != &fair_sched_class) { //为什么会出现非fair task？
+	/*
+	 *  为什么会出现非fair task？经查该函数是在core.c的wake_up_new_task()里被调用，被wakeup的task不只是fair task。
+	 */
+	if (p->sched_class != &fair_sched_class) {
 		/*
 		 * For !fair tasks do:
 		 *
