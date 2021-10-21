@@ -775,7 +775,7 @@ void post_init_entity_util_avg(struct task_struct *p)
 	struct sched_entity *se = &p->se;
 	struct cfs_rq *cfs_rq = cfs_rq_of(se);
 	struct sched_avg *sa = &se->avg;
-	/* 疑问： new task还没有被加入到某个task group？不然下面获取cpu_scale必然会出现错误啊 */
+	/* 疑问： new task如果是某个task group里的一员，下面获取的cap值必然会出现错误啊 */
 	long cpu_scale = arch_scale_cpu_capacity(cpu_of(rq_of(cfs_rq)));
 	long cap = (long)(cpu_scale - cfs_rq->avg.util_avg) / 2;
 
