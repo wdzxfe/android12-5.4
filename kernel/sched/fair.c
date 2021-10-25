@@ -511,7 +511,7 @@ static inline int entity_before(struct sched_entity *a, struct sched_entity *b)
 	return (s64)(a->vruntime - b->vruntime) < 0;
 }
 /*
- * 更新cfs_rq的vruntime。要么是cfs_rq->curr，要么是cfs_rq rbtree最左端se的vruntime最小值。
+ * 更新cfs_rq的min_vruntime。要么是cfs_rq->curr，要么是cfs_rq rbtree最左端se的vruntime最小值。
  * 但为了保证min_vruntime的单调递增，只有当前面二者比较得到的最小值大于此刻的cfs_rq->min_vruntime才进行更新。
  * 所以，cfs_rq上的task可以小于min_vruntime, min_vruntime只是用于task创建或迁移到该cfs_rq时更新这个task的vruntime吗？
  */
@@ -823,40 +823,52 @@ static void update_curr(struct cfs_rq *cfs_rq)
 
 	if (unlikely(!curr))
 		return;
-
+	/*
+	 * 在每次task被选中要运行时，通过set_next_entity()--> update_stats_curr_start()
+	 * 来设置task的exec_start.
+	 */
 	delta_exec = now - curr->exec_start;
 	if (unlikely((s64)delta_exec <= 0))
 		return;
 
-	curr->exec_start = now;
+	curr->exec_start = now; //所以exec_start并不是该cfs se开始执行的时间，非字面意思。
 
-	schedstat_set(curr->statistics.exec_max,
+	schedstat_set(curr->statistics.exec_max, //疑问：update的点太多，留着这个exec_max又有什么意义呢？
 		      max(delta_exec, curr->statistics.exec_max));
 
-	curr->sum_exec_runtime += delta_exec;
-	schedstat_add(cfs_rq->exec_clock, delta_exec);
+	curr->sum_exec_runtime += delta_exec; //代表se自创建后总的运行时间（wall time）
+	schedstat_add(cfs_rq->exec_clock, delta_exec); //cfs_rq执行task的总时间，提供用户层debug信息，没啥大用
 
-	curr->vruntime += calc_delta_fair(delta_exec, curr);
+	curr->vruntime += calc_delta_fair(delta_exec, curr); //将wall time的delta_exec折算为vruntime，并累加。
 	update_min_vruntime(cfs_rq);
 
 	if (entity_is_task(curr)) {
 		struct task_struct *curtask = task_of(curr);
 
 		trace_sched_stat_runtime(curtask, delta_exec, curr->vruntime);
-		cgroup_account_cputime(curtask, delta_exec);
+		cgroup_account_cputime(curtask, delta_exec); //疑问：cgrp相关代码，可能是更新cgrp的cputime等信息，后续check
 		account_group_exec_runtime(curtask, delta_exec);
 	}
-
-	account_cfs_rq_runtime(cfs_rq, delta_exec);
+	account_cfs_rq_runtime(cfs_rq, delta_exec); //CFS_BANDWIDTH未开时是空函数，忽略。
 }
-
-static void update_curr_fair(struct rq *rq)
+/*
+ * 每个调度类都需要实现sched_class->update_curr这个成员函数。
+ * update_curr_fair()就是fair class对应的函数。
+ */
+static void update_curr_fair(struct rq *rq) //这里的rq是cpu的rq，curr就是当前cpu上运行的task。
 {
 	update_curr(cfs_rq_of(&rq->curr->se));
 }
 
-static inline void
-update_stats_wait_start(struct cfs_rq *cfs_rq, struct sched_entity *se)
+/******************************************************
+ * task运行的统计信息相关函数，暂时跳过 
+ */
+
+/*
+ * 统计se在cfs_rq上runnable的wait时间。
+ * update_stats_wait_start()和update_stats_wait_end()配合使用。
+ */
+static inline void update_stats_wait_start(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 	u64 wait_start, prev_wait_start;
 
@@ -866,6 +878,10 @@ update_stats_wait_start(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	wait_start = rq_clock(rq_of(cfs_rq));
 	prev_wait_start = schedstat_val(se->statistics.wait_start);
 
+	/*
+	 * 疑问：对于即将迁走的task的特殊处理，和update_stats_wait_end()配合使用。
+	 * 暂时搞不清楚有什么用，后面关注！！！
+	 */
 	if (entity_is_task(se) && task_on_rq_migrating(task_of(se)) &&
 	    likely(wait_start > prev_wait_start))
 		wait_start -= prev_wait_start;
@@ -873,14 +889,12 @@ update_stats_wait_start(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	__schedstat_set(se->statistics.wait_start, wait_start);
 }
 
-static inline void
-update_stats_wait_end(struct cfs_rq *cfs_rq, struct sched_entity *se)
+static inline void update_stats_wait_end(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 	struct task_struct *p;
 	u64 delta;
 
-	if (!schedstat_enabled())
-		return;
+	if (!schedstat_enabled()) return;
 
 	delta = rq_clock(rq_of(cfs_rq)) - schedstat_val(se->statistics.wait_start);
 
@@ -897,16 +911,13 @@ update_stats_wait_end(struct cfs_rq *cfs_rq, struct sched_entity *se)
 		}
 		trace_sched_stat_wait(p, delta);
 	}
-
-	__schedstat_set(se->statistics.wait_max,
-		      max(schedstat_val(se->statistics.wait_max), delta));
+	__schedstat_set(se->statistics.wait_max, max(schedstat_val(se->statistics.wait_max), delta));
 	__schedstat_inc(se->statistics.wait_count);
 	__schedstat_add(se->statistics.wait_sum, delta);
 	__schedstat_set(se->statistics.wait_start, 0);
 }
 
-static inline void
-update_stats_enqueue_sleeper(struct cfs_rq *cfs_rq, struct sched_entity *se)
+static inline void update_stats_enqueue_sleeper(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 	struct task_struct *tsk = NULL;
 	u64 sleep_start, block_start;
@@ -977,8 +988,7 @@ update_stats_enqueue_sleeper(struct cfs_rq *cfs_rq, struct sched_entity *se)
 /*
  * Task is being enqueued - update stats:
  */
-static inline void
-update_stats_enqueue(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
+static inline void update_stats_enqueue(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 {
 	if (!schedstat_enabled())
 		return;
@@ -994,8 +1004,7 @@ update_stats_enqueue(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 		update_stats_enqueue_sleeper(cfs_rq, se);
 }
 
-static inline void
-update_stats_dequeue(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
+static inline void update_stats_dequeue(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 {
 
 	if (!schedstat_enabled())
@@ -1022,9 +1031,9 @@ update_stats_dequeue(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 
 /*
  * We are picking a new current task - update its stats:
+ * task开始运行时设置其exec_start,后续在update_curr里更新!
  */
-static inline void
-update_stats_curr_start(struct cfs_rq *cfs_rq, struct sched_entity *se)
+static inline void update_stats_curr_start(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 	/*
 	 * We are starting a new run period:
@@ -1035,20 +1044,12 @@ update_stats_curr_start(struct cfs_rq *cfs_rq, struct sched_entity *se)
 /**************************************************
  * Scheduling class queueing methods:
  */
-static void task_tick_numa(struct rq *rq, struct task_struct *curr) {}
-static inline void account_numa_enqueue(struct rq *rq, struct task_struct *p) {}
-static inline void account_numa_dequeue(struct rq *rq, struct task_struct *p) {}
-static inline void update_scan_period(struct task_struct *p, int new_cpu) {}
-
-static void
-account_entity_enqueue(struct cfs_rq *cfs_rq, struct sched_entity *se)
+static void account_entity_enqueue(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
-	update_load_add(&cfs_rq->load, se->load.weight);
+	update_load_add(&cfs_rq->load, se->load.weight); //cfs_rq->load就是enqueue其上的各se->load.weight的总和。
 #ifdef CONFIG_SMP
 	if (entity_is_task(se)) {
-		struct rq *rq = rq_of(cfs_rq);
-
-		account_numa_enqueue(rq, task_of(se));
+		struct rq *rq = rq_of(cfs_rq);//疑问：如果这个cfs_rq是个depth很深的task grp的，这个rq是啥？
 		list_add(&se->group_node, &rq->cfs_tasks);
 	}
 #endif
@@ -1061,7 +1062,6 @@ account_entity_dequeue(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	update_load_sub(&cfs_rq->load, se->load.weight);
 #ifdef CONFIG_SMP
 	if (entity_is_task(se)) {
-		account_numa_dequeue(rq_of(cfs_rq), task_of(se));
 		list_del_init(&se->group_node);
 	}
 #endif
@@ -4193,8 +4193,6 @@ static void migrate_task_rq_fair(struct task_struct *p, int new_cpu)
 
 	/* We have migrated, no longer consider this task hot */
 	p->se.exec_start = 0;
-
-	update_scan_period(p, new_cpu);
 }
 
 static void task_dead_fair(struct task_struct *p)
@@ -7598,10 +7596,6 @@ static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
 		cfs_rq = cfs_rq_of(se);
 		entity_tick(cfs_rq, se, queued);
 	}
-
-	if (static_branch_unlikely(&sched_numa_balancing))
-		task_tick_numa(rq, curr);
-
 	update_misfit_status(curr, rq);
 	update_overutilized_status(task_rq(curr));
 }

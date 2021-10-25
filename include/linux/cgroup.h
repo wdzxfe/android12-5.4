@@ -755,7 +755,6 @@ static inline void cgroup_path_from_kernfs_id(const union kernfs_node_id *id,
 	char *buf, size_t buflen) {}
 #endif /* !CONFIG_CGROUPS */
 
-#ifdef CONFIG_CGROUPS
 /*
  * cgroup scalable recursive statistics.
  */
@@ -809,16 +808,6 @@ static inline void cgroup_account_cputime_field(struct task_struct *task,
 		__cgroup_account_cputime_field(cgrp, index, delta_exec);
 	rcu_read_unlock();
 }
-
-#else	/* CONFIG_CGROUPS */
-
-static inline void cgroup_account_cputime(struct task_struct *task,
-					  u64 delta_exec) {}
-static inline void cgroup_account_cputime_field(struct task_struct *task,
-						enum cpu_usage_stat index,
-						u64 delta_exec) {}
-
-#endif	/* CONFIG_CGROUPS */
 
 /*
  * sock->sk_cgrp_data handling.  For more info, see sock_cgroup_data
