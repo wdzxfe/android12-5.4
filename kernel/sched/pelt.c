@@ -24,6 +24,10 @@
  *  Author: Vincent Guittot <vincent.guittot@linaro.org>
  */
 
+/* 参考文章：
+ * https://zhuanlan.zhihu.com/p/158185705
+ */
+
 #include <linux/sched.h>
 #include "sched.h"
 #include "pelt.h"
@@ -33,11 +37,12 @@
 /*
  * Approximate:
  *   val * y^n,    where y^32 ~= 0.5 (~1 scheduling period)
+ * decay_load()函数用于计算val*(y^n)的值
  */
 static u64 decay_load(u64 val, u64 n)
 {
 	unsigned int local_n;
-
+	/* LOAD_AVG_PERIOD=32，即32*63（～2016ms）前的负载对当前的贡献忽略不计 */
 	if (unlikely(n > LOAD_AVG_PERIOD * 63))
 		return 0;
 
@@ -46,17 +51,25 @@ static u64 decay_load(u64 val, u64 n)
 
 	/*
 	 * As y^PERIOD = 1/2, we can combine
+	 * 	  y^n = y^((n/PERIOD)*PERIOD + n%PERIOD)
+	 * 	  y^n = (y^PERIOD)^(n/PERIOD) * y^(n%PERIOD)
 	 *    y^n = 1/2^(n/PERIOD) * y^(n%PERIOD)
 	 * With a look-up table which covers y^n (n<PERIOD)
-	 *
+	 * 因为y^32=0.5，所以y^n可以变为1/2^(n/32) * y^(n%32)
 	 * To achieve constant time decay_load.
 	 */
 	if (unlikely(local_n >= LOAD_AVG_PERIOD)) {
+		/* val = val * (1/2)^(local_n/32) */
 		val >>= local_n / LOAD_AVG_PERIOD;
+		/* local_n = local_n%32 */
 		local_n %= LOAD_AVG_PERIOD;
 	}
-
-	val = mul_u64_u32_shr(val, runnable_avg_yN_inv[local_n], 32);
+	/* 	  将y^(n%32)的一共32中32种取值，提前计算好再乘以2^32（提高计算精度），
+     *    结果记录在runnable_avg_yN_inv数组中，这样mul_u64_u32_shr函数计算的
+     *    (val*runnable_avg_yN_inv[local_n])/2^32即为val*y^n的值，
+     *    此时decay_load()函数的时间复杂度从原始版本的O(n)变为了O(1)
+     */
+	val = mul_u64_u32_shr(val, runnable_avg_yN_inv[local_n], 32); //shr:右移32bit
 	return val;
 }
 
@@ -86,6 +99,10 @@ static u32 __accumulate_pelt_segments(u64 periods, u32 d1, u32 d3)
 #define cap_scale(v, s) ((v)*(s) >> SCHED_CAPACITY_SHIFT)
 
 /*
+ * accumulate_sum()函数负责计算se|cfs_rq当前的负载贡献，接受的形参如下：
+ * delta：距离上一次计算的物理时间间隔，单位us
+ * sa：se|cfs_rq对应的struct sched_avg成员
+ * 
  * Accumulate the three separate parts of the sum; d1 the remainder
  * of the last (incomplete) period, d2 the span of full periods and d3
  * the remainder of the (incomplete) current period.
@@ -145,6 +162,14 @@ accumulate_sum(u64 delta, struct sched_avg *sa,
 }
 
 /*
+ * 为了实现sched entity级别的负载跟踪，pelt将物理时间划分成了1ms（实际为1024us）的序列，
+ * 在每一个1024us的周期中，sched entity对系统负载的贡献可以根据该entity处于runnable状态
+ * （包含在cpu上running和在cfs_rq上waiting的状态）的时间进行计算；假设该周期内，
+ * 某entity处于runnable状态的时间为x，那么其对系统负载的贡献为（x/1024）；
+ * pelt还会累积过去周期的负载贡献，但会根据时间乘以相应的衰减系数y，
+ * 假设Li表示某entity在周期Pi中对系统负载的贡献，那么该entity对系统负载的总贡献为：
+ * L = L0 + L1*y + L2*y^2 + L3*y^3+... (y^32=0.5)
+ * 
  * We can represent the historical contribution to runnable average as the
  * coefficients of a geometric series.  To do this we sub-divide our runnable
  * history into segments of approximately 1ms (1024us); label the segment that
