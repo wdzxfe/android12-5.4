@@ -1049,7 +1049,7 @@ static void account_entity_enqueue(struct cfs_rq *cfs_rq, struct sched_entity *s
 	update_load_add(&cfs_rq->load, se->load.weight); //cfs_rq->load就是enqueue其上的各se->load.weight的总和。
 #ifdef CONFIG_SMP
 	if (entity_is_task(se)) {
-		struct rq *rq = rq_of(cfs_rq);//疑问：如果这个cfs_rq是个depth很深的task grp的，这个rq是啥？
+		struct rq *rq = rq_of(cfs_rq);//疑问：如果这个cfs_rq是depth很深的task grp的，这个rq是啥？
 		list_add(&se->group_node, &rq->cfs_tasks);
 	}
 #endif
@@ -1059,7 +1059,7 @@ static void account_entity_enqueue(struct cfs_rq *cfs_rq, struct sched_entity *s
 static void
 account_entity_dequeue(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
-	update_load_sub(&cfs_rq->load, se->load.weight);
+	update_load_sub(&cfs_rq->load, se->load.weight);//剔除se的load.weight.
 #ifdef CONFIG_SMP
 	if (entity_is_task(se)) {
 		list_del_init(&se->group_node);
@@ -1074,6 +1074,7 @@ account_entity_dequeue(struct cfs_rq *cfs_rq, struct sched_entity *se)
  * Explicitly do a load-store to ensure the intermediate value never hits
  * memory. This allows lockless observations without ever seeing the negative
  * values.
+ * 有符号的加法，前者更新为二者的和。
  */
 #define add_positive(_ptr, _val) do {                           \
 	typeof(_ptr) ptr = (_ptr);                              \
@@ -1094,6 +1095,7 @@ account_entity_dequeue(struct cfs_rq *cfs_rq, struct sched_entity *se)
  * Explicitly do a load-store to ensure the intermediate value never hits
  * memory. This allows lockless observations without ever seeing the negative
  * values.
+ * 无符号的减法，前者更新为二者的差。
  */
 #define sub_positive(_ptr, _val) do {				\
 	typeof(_ptr) ptr = (_ptr);				\
@@ -1110,6 +1112,7 @@ account_entity_dequeue(struct cfs_rq *cfs_rq, struct sched_entity *se)
  *
  * A variant of sub_positive(), which does not use explicit load-store
  * and is thus optimized for local variable updates.
+ * 减法的实现，前者-后者，并用差值更新前者，不会出现负值。
  */
 #define lsub_positive(_ptr, _val) do {				\
 	typeof(_ptr) ptr = (_ptr);				\
@@ -2223,13 +2226,14 @@ static inline bool cfs_bandwidth_used(void);
  * this way we don't have the most up-to-date min_vruntime on the originating
  * CPU and an up-to-date min_vruntime on the destination CPU.
  */
-
+/*
+ *  参数cfs_rq不一定是root cfs_rq，而se可能是task group对于的se！！！
+ */
 static void
 enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 {
 	bool renorm = !(flags & ENQUEUE_WAKEUP) || (flags & ENQUEUE_MIGRATED);
 	bool curr = cfs_rq->curr == se;
-
 	/*
 	 * If we're the current task, we must renormalise before calling
 	 * update_curr().
@@ -2695,32 +2699,36 @@ static inline void update_overutilized_status(struct rq *rq)
  * The enqueue_task method is called before nr_running is
  * increased. Here we update the fair scheduling stats and
  * then put the task into the rbtree:
+ * sched_class::enqueue_task()方法在CFS里的实现。
  */
 static void
 enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 {
 	struct cfs_rq *cfs_rq;
-	struct sched_entity *se = &p->se;
-	int idle_h_nr_running = task_has_idle_policy(p);
+	struct sched_entity *se = &p->se; //获取p所内嵌的se
+	int idle_h_nr_running = task_has_idle_policy(p); //判断p是否是idle task，swapper/x? 从这里看idle task是按CFS来调度的。
 	int task_new = !(flags & ENQUEUE_WAKEUP);
-
 	/*
 	 * The code below (indirectly) updates schedutil which looks at
 	 * the cfs_rq utilization to select a frequency.
 	 * Let's add the task's estimated utilization to the cfs_rq's
 	 * estimated utilization, before we update schedutil.
+	 * 更新rq下cfs_rq,貌似叫做root cfs_rq的util_est,就是将task p的util_est累加上去。
+	 * 更新动作要在调用schedutil之前进行，但这里只更新util_est，并未发起变频。
 	 */
 	util_est_enqueue(&rq->cfs, p);
 
 	/*
 	 * If in_iowait is set, the code below may not trigger any cpufreq
-	 * utilization updates, so do it here explicitly with the IOWAIT flag
+	 * utilization updates, so do it here explicitly（明确地） with the IOWAIT flag
 	 * passed.
+	 * dvfs_point: 专门对因IOWAIT sleep的task在唤醒时进行频率上的补偿，提升性能。
 	 */
 	if (p->in_iowait)
 		cpufreq_update_util(rq, SCHED_CPUFREQ_IOWAIT);
 
 	for_each_sched_entity(se) {
+		/*对于task p所内嵌的se来说，se->on_rq应该为0，但parent se不一定为0，向上找到非0的se即可保证p入队到rq了。*/
 		if (se->on_rq)
 			break;
 		cfs_rq = cfs_rq_of(se);
