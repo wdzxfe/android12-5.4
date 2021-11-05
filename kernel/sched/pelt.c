@@ -164,7 +164,12 @@ accumulate_sum(u64 delta, struct sched_avg *sa,
 	}
 	sa->period_contrib = delta; /* 更新sa->period_contrib */
 
-	/* 根据laod、runnabe、running等条件，决定是否统计本delta的负载贡献 */
+	/* 根据load、runnabe、running等条件，决定是否统计本delta的负载贡献。
+	 * 对于sched_entity，参考函数__update_load_avg_se()
+	 *		load = !!se->on_rq, runnable = !!se->on_rq, running = cfs_rq->curr == se
+	 *		除util_sum外，load|runnable_load_sum只是时间贡献值的总和。
+	 * 对于cfs_rq
+	 */
 	if (load)
 		sa->load_sum += load * contrib;
 	if (runnable)
@@ -267,19 +272,19 @@ static __always_inline void
 ___update_load_avg(struct sched_avg *sa, unsigned long load, unsigned long runnable)
 {
 	/* 在commit 625ed2bf049d5（sched/cfs: Make util/load_avg more stable）
-     * 中对此对了解释：
-     *      LOAD_AVG_MAX*y + 1024(us) = LOAD_AVG_MAX        (1)
-     *      max_value = LOAD_AVG_MAX*y + sa->period_contrib (2)
-     *      根据(1)、(2)，精确的负载最大值应为LOAD_AVG_MAX - 1024 + sa->period_contrib
-     */
+	 * 中对此对了解释：
+	 * LOAD_AVG_MAX*y + 1024(us) = LOAD_AVG_MAX        (1)
+	 * max_value = LOAD_AVG_MAX*y + sa->period_contrib (2)
+	 * 根据(1)、(2)，精确的负载最大值应为LOAD_AVG_MAX - 1024 + sa->period_contrib
+	 */
 	u32 divider = LOAD_AVG_MAX - 1024 + sa->period_contrib;
 
 	/*
 	 * Step 2: update *_avg.
 	 * 更新 {load|runnable|util}_avg:
-     *              sa->load_avg = (load * sa->load_sum) / divider
-     *              sa->runnable_avg = sa->runnable_sum / divider
-     *              sa->util_avg = sa->util_sum / dividers
+	 *        sa->load_avg = (load * sa->load_sum) / divider
+	 *        sa->runnable_avg = runnable * sa->runnable_load_sum / divider
+	 *        sa->util_avg = sa->util_sum / dividers
 	 */
 	sa->load_avg = div_u64(load * sa->load_sum, divider);
 	sa->runnable_load_avg =	div_u64(runnable * sa->runnable_load_sum, divider);
@@ -316,6 +321,9 @@ ___update_load_avg(struct sched_avg *sa, unsigned long load, unsigned long runna
 int __update_load_avg_blocked_se(u64 now, struct sched_entity *se)
 {
 	if (___update_load_sum(now, &se->avg, 0, 0, 0)) {
+		/* 对于se的sa->load|runnable_load_sum，在___update_load_sum()仅仅计算出了总的时间贡献值，
+		 * 所以要在___update_load_avg()里传入se_weight(se)和se_runnable(se)来计算负载的平均值。
+		 */
 		___update_load_avg(&se->avg, se_weight(se), se_runnable(se));
 		trace_pelt_se_tp(se);
 		return 1;
@@ -328,7 +336,6 @@ int __update_load_avg_se(u64 now, struct cfs_rq *cfs_rq, struct sched_entity *se
 {
 	if (___update_load_sum(now, &se->avg, !!se->on_rq, !!se->on_rq,
 				cfs_rq->curr == se)) {
-
 		___update_load_avg(&se->avg, se_weight(se), se_runnable(se));
 		cfs_se_util_change(&se->avg);
 		trace_pelt_se_tp(se);
