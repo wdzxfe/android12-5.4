@@ -88,8 +88,17 @@ static u32 __accumulate_pelt_segments(u64 periods, u32 d1, u32 d3)
 	 *            n=1
 	 *
 	 *              inf        inf
-	 *    = 1024 ( \Sum y^n - \Sum y^n - y^0 )
+	 *    = 1024 ( \Sum y^n - \Sum y^n - y^0 )   对第二项提取公因子y^p
 	 *              n=0        n=p
+	 * 
+	 *              inf              inf                                        inf
+	 *    = 1024 ( \Sum y^n - y^p * \Sum y^n - y^0 )   既然 LOAD_AVG_MAX = 1024 \Sum y^n
+	 *              n=0              n=0                                        n=0
+	 * 
+	 *    = LOAD_AVG_MAX - LOAD_AVG_MAX * y^n - 1024
+	 * 
+	 *    = LOAD_AVG_MAX - decay_load(LOAD_AVG_MAX, periods) - 1024
+	 * 
 	 */
 	c2 = LOAD_AVG_MAX - decay_load(LOAD_AVG_MAX, periods) - 1024;
 
@@ -122,6 +131,9 @@ static u32 __accumulate_pelt_segments(u64 periods, u32 d1, u32 d3)
  *                     p-1
  *      d1 y^p + 1024 \Sum y^n + d3 y^0		(Step 2)
  *                     n=1
+ * 
+ * Step1是对原来的load/runnable_load/util_sum进行衰减，每次更新都必须进行的。
+ * Step2只是计算本delta的时间贡献值，能否贡献到loadrunnable_load/util_sum里，还要看这段时间里se|cfs_rq的load/runnable/running值。
  */
 static __always_inline u32
 accumulate_sum(u64 delta, struct sched_avg *sa,
@@ -137,6 +149,7 @@ accumulate_sum(u64 delta, struct sched_avg *sa,
 	 * Step 1: decay old *_sum if we crossed period boundaries.
 	 */
 	if (periods) {
+		/* 无论本delta期间的负载贡献是否被统计，都需要对上一次计算的负载贡献值进行衰减 */
 		sa->load_sum = decay_load(sa->load_sum, periods);
 		sa->runnable_load_sum =
 			decay_load(sa->runnable_load_sum, periods);
@@ -145,12 +158,13 @@ accumulate_sum(u64 delta, struct sched_avg *sa,
 		/*
 		 * Step 2
 		 */
-		delta %= 1024;
-		contrib = __accumulate_pelt_segments(periods,
+		delta %= 1024; //计算d3，即本次update时最后未满1024us的部分。
+		contrib = __accumulate_pelt_segments(periods, //contrib仅仅是获取的时间贡献。
 				1024 - sa->period_contrib, delta);
 	}
-	sa->period_contrib = delta;
+	sa->period_contrib = delta; /* 更新sa->period_contrib */
 
+	/* 根据laod、runnabe、running等条件，决定是否统计本delta的负载贡献 */
 	if (load)
 		sa->load_sum += load * contrib;
 	if (runnable)
@@ -203,7 +217,7 @@ ___update_load_sum(u64 now, struct sched_avg *sa,
 {
 	u64 delta;
 
-	delta = now - sa->last_update_time;
+	delta = now - sa->last_update_time; //delta单位为ns
 	/*
 	 * This should only happen when time goes backwards, which it
 	 * unfortunately does during sched clock init when we swap over to TSC.
@@ -217,11 +231,11 @@ ___update_load_sum(u64 now, struct sched_avg *sa,
 	 * Use 1024ns as the unit of measurement since it's a reasonable
 	 * approximation of 1us and fast to compute.
 	 */
-	delta >>= 10;
-	if (!delta)
+	delta >>= 10; //delta由ns近似转换为us
+	if (!delta) //不足1us没必要进行衰减等计算，直接返回
 		return 0;
 
-	sa->last_update_time += delta << 10;
+	sa->last_update_time += delta << 10; //更新last_update_time，单位ns，所以需要delta << 10.
 
 	/*
 	 * running is a subset of runnable (weight) so running can't be set if
@@ -230,7 +244,7 @@ ___update_load_sum(u64 now, struct sched_avg *sa,
 	 * This means that weight will be 0 but not running for a sched_entity
 	 * but also for a cfs_rq if the latter becomes idle. As an example,
 	 * this happens during idle_balance() which calls
-	 * update_blocked_averages()
+	 * update_blocked_averages() cfs_rq为空时其load也为0.
 	 */
 	if (!load)
 		runnable = running = 0;
@@ -241,6 +255,7 @@ ___update_load_sum(u64 now, struct sched_avg *sa,
 	 *
 	 * Step 1: accumulate *_sum since last_update_time. If we haven't
 	 * crossed period boundaries, finish.
+	 * 调用accumulate_sum()函数对负载贡献进行计算，并依据更新条件更新{load|runnable|util}_sum值
 	 */
 	if (!accumulate_sum(delta, sa, load, runnable, running))
 		return 0;
@@ -251,10 +266,20 @@ ___update_load_sum(u64 now, struct sched_avg *sa,
 static __always_inline void
 ___update_load_avg(struct sched_avg *sa, unsigned long load, unsigned long runnable)
 {
+	/* 在commit 625ed2bf049d5（sched/cfs: Make util/load_avg more stable）
+     * 中对此对了解释：
+     *      LOAD_AVG_MAX*y + 1024(us) = LOAD_AVG_MAX        (1)
+     *      max_value = LOAD_AVG_MAX*y + sa->period_contrib (2)
+     *      根据(1)、(2)，精确的负载最大值应为LOAD_AVG_MAX - 1024 + sa->period_contrib
+     */
 	u32 divider = LOAD_AVG_MAX - 1024 + sa->period_contrib;
 
 	/*
 	 * Step 2: update *_avg.
+	 * 更新 {load|runnable|util}_avg:
+     *              sa->load_avg = (load * sa->load_sum) / divider
+     *              sa->runnable_avg = sa->runnable_sum / divider
+     *              sa->util_avg = sa->util_sum / dividers
 	 */
 	sa->load_avg = div_u64(load * sa->load_sum, divider);
 	sa->runnable_load_avg =	div_u64(runnable * sa->runnable_load_sum, divider);

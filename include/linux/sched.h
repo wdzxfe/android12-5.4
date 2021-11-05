@@ -442,9 +442,7 @@ struct sched_statistics {
 	u64				nr_wakeups_idle;
 #endif
 };
-/*
- * 参考文章：https://zhuanlan.zhihu.com/p/158185705
- */
+
 struct sched_entity {
 	/* For load-balancing: */
 	struct load_weight		load;
