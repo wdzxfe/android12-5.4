@@ -445,11 +445,11 @@ struct sched_statistics {
 
 struct sched_entity {
 	/* For load-balancing: */
-	struct load_weight		load;
-	unsigned long			runnable_weight;
-	struct rb_node			run_node;
+	struct load_weight		load; //调度实体se的负载权重（load weight），cfs task是根据nice值定义好的。
+	unsigned long			runnable_weight; //对于task se，runnable_weight = load, 但group se不是这样...
+	struct rb_node			run_node; //用于挂到所在cfs_rq的rbtree上的node，所以嵌入到rbtree的是se，而不仅仅是task。
 	struct list_head		group_node;
-	unsigned int			on_rq;
+	unsigned int			on_rq; //该se是否挂入到所直属的cfs_rq上。
 
 	u64				exec_start;
 	u64				sum_exec_runtime;
@@ -461,12 +461,12 @@ struct sched_entity {
 	struct sched_statistics		statistics;
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
-	int				depth;
-	struct sched_entity		*parent;
+	int				depth; //该se的深度，顶层的se（挂到rq->cfs_rq的se）深度是0。
+	struct sched_entity		*parent; //task group可以嵌套，通过parent找到上一级task group的se。
 	/* rq on which this entity is (to be) queued: */
-	struct cfs_rq			*cfs_rq;
+	struct cfs_rq			*cfs_rq; //该se所直属的cfs_rq.
 	/* rq "owned" by this entity/group: */
-	struct cfs_rq			*my_q;
+	struct cfs_rq			*my_q; //该se所拥有的cfs rq。只有group se才有所属cfs rq，task se没有。
 #endif
 
 #ifdef CONFIG_SMP

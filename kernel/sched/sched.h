@@ -495,25 +495,35 @@ struct cfs_bandwidth { };
 
 /* CFS-related fields in a runqueue */
 struct cfs_rq {
+	/* 挂入该cfs rq的所有se的负载权重（sched_entity::load）之和 */
 	struct load_weight	load;
+	/* 该cfs rq所有的se runnable weight之和 */
 	unsigned long		runnable_weight;
+	/* cfs rq上处于该层级的runnable+running状态se的数目，在account_entity_enqueue|dequenue()里更新 */
 	unsigned int		nr_running;
+	/*
+	 * cfs rq会形成层级结构，该成员表示整个cfs rq上处于runnable+running状态的se的数目。
+	 * 所有层级，即以该cfs rq为根的整个hierarchy上所有的se数目。 
+	 */
 	unsigned int		h_nr_running;      /* SCHED_{NORMAL,BATCH,IDLE} */
+	/* 概念类似于h_nr_running,只不过统计的是调度策略为SCHED_IDLE的se数目 */
 	unsigned int		idle_h_nr_running; /* SCHED_IDLE */
 
 	u64			exec_clock;
-	u64			min_vruntime;
+	/* 单调递增的min_vruntime, 不一定是所有rbtree上se的最小vruntime。例如一个长时间sleep的task被唤醒？ */
+	u64			min_vruntime; 
 #ifndef CONFIG_64BIT
 	u64			min_vruntime_copy;
 #endif
 
-	struct rb_root_cached	tasks_timeline;
+	struct rb_root_cached	tasks_timeline; //rbtree的根，se就是挂在这个root下面。
 
 	/*
 	 * 'curr' points to currently running entity on this cfs_rq.
 	 * It is set to NULL otherwise (i.e when none are currently running).
 	 */
 	struct sched_entity	*curr;
+	/* next，last，skip用于调度器的buddy算法，疑问：啥事buddy算法？ */
 	struct sched_entity	*next;
 	struct sched_entity	*last;
 	struct sched_entity	*skip;
@@ -530,6 +540,10 @@ struct cfs_rq {
 #ifndef CONFIG_64BIT
 	u64			load_last_update_time_copy;
 #endif
+	/*
+	 * 当一个task退出或者唤醒后迁移到其他cpu上时，原本所在cpu的cfs rq上需要移除该tsk带来的负载。
+	 * 由于持rq锁问题，所以先把移除的负载记录在这个成员中，适当的时机再更新之。
+	 */
 	struct {
 		raw_spinlock_t	lock ____cacheline_aligned;
 		int		nr;
@@ -539,7 +553,11 @@ struct cfs_rq {
 	} removed;
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
+	/* 这个cfs rq向整个task group的负载贡献值 */
 	unsigned long		tg_load_avg_contrib;
+	/* 在负载沿着PELT（task group吧？）层级结构传播的时候，propagate用来判断是否有上传的load，
+	 * prop_runnable_sum表示上传的负载值。疑问：怎么用的？
+	 */
 	long			propagate;
 	long			prop_runnable_sum;
 
@@ -569,18 +587,6 @@ struct cfs_rq {
 	int			on_list;
 	struct list_head	leaf_cfs_rq_list;
 	struct task_group	*tg;	/* group that "owns" this runqueue */
-
-#ifdef CONFIG_CFS_BANDWIDTH
-	int			runtime_enabled;
-	s64			runtime_remaining;
-
-	u64			throttled_clock;
-	u64			throttled_clock_task;
-	u64			throttled_clock_task_time;
-	int			throttled;
-	int			throttle_count;
-	struct list_head	throttled_list;
-#endif /* CONFIG_CFS_BANDWIDTH */
 #endif /* CONFIG_FAIR_GROUP_SCHED */
 };
 

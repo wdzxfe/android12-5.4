@@ -26,6 +26,7 @@
 
 /* 参考文章：
  * https://zhuanlan.zhihu.com/p/158185705
+ * https://www.cnblogs.com/Linux-tech/p/13873884.html
  */
 
 #include <linux/sched.h>
@@ -320,9 +321,13 @@ ___update_load_avg(struct sched_avg *sa, unsigned long load, unsigned long runna
 
 int __update_load_avg_blocked_se(u64 now, struct sched_entity *se)
 {
+	/* blocked_se即在delta时段内se不在rq上，通过设置load=0, runnable=0, running=0，达到只衰减历史负载的目的 */
 	if (___update_load_sum(now, &se->avg, 0, 0, 0)) {
 		/* 对于se的sa->load|runnable_load_sum，在___update_load_sum()仅仅计算出了总的时间贡献值，
-		 * 所以要在___update_load_avg()里传入se_weight(se)和se_runnable(se)来计算负载的平均值。
+		 * 也就是说se的sa->load|runnbale_load_sum仅仅是总的时间贡献值，所以要在___update_load_avg()里传入
+		 * se_weight(se)和se_runnable(se)来计算负载的平均值。这样se的sa->load|runnable_load_avg才带有了
+		 * 负载（专指权重weight）的信息。
+		 * 但se的sa->util_sum和sa->util_avg和load是有区别的，始终就是指util的贡献值。
 		 */
 		___update_load_avg(&se->avg, se_weight(se), se_runnable(se));
 		trace_pelt_se_tp(se);
@@ -334,6 +339,7 @@ int __update_load_avg_blocked_se(u64 now, struct sched_entity *se)
 
 int __update_load_avg_se(u64 now, struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
+	/*疑问：对于在rq上的se而言，按说无论是*/
 	if (___update_load_sum(now, &se->avg, !!se->on_rq, !!se->on_rq,
 				cfs_rq->curr == se)) {
 		___update_load_avg(&se->avg, se_weight(se), se_runnable(se));
