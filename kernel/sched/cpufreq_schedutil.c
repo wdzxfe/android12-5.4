@@ -209,21 +209,27 @@ static unsigned int get_next_freq(struct sugov_policy *sg_policy,
  * based on the task model parameters and gives the minimal utilization
  * required to meet deadlines.
  */
+ /*
+  * 个人见解：
+  * 该函数计算了cpu上的total_util = util_cfs + util_rt + util_dl + util_irq，但处理上要区分FREQUENCY_UTIL和ENERGY_UTIL。
+  * type为FREQUENCY_UTIL时是为了后续变频，这时候就要考虑uclamp对util的钳位作用，得到更准确的后续频率。
+  * type为ENERGY_UTIL目的是计算cpu运行这些util所消耗的energy，所以这里的util务必接近实际，所以就不能有诸如uclamp所引入的钳位了。
+  */
+
 unsigned long schedutil_cpu_util(int cpu, unsigned long util_cfs,
 				 unsigned long max, enum schedutil_type type,
 				 struct task_struct *p)
 {
 	unsigned long dl_util, util, irq;
 	struct rq *rq = cpu_rq(cpu);
-
-	if (!uclamp_is_used() &&
-	    type == FREQUENCY_UTIL && rt_rq_is_runnable(&rq->rt)) {
+	/* uclamp没有开启的情况下来计算变频所需的util时，如果有rt task runnable就给到max util，利于提升性能 */
+	if (!uclamp_is_used() && type == FREQUENCY_UTIL && rt_rq_is_runnable(&rq->rt)) {
 		return max;
 	}
 
 	/*
-	 * Early check to see if IRQ/steal time saturates the CPU, can be
-	 * because of inaccuracies in how we track these -- see
+	 * Early check to see if IRQ/steal time(虚拟机相关的一个time) saturates(使充满) the CPU, can be
+	 * because of inaccuracies(不精确) in how we track these -- see
 	 * update_irq_load_avg().
 	 */
 	irq = cpu_util_irq(rq);
@@ -243,7 +249,7 @@ unsigned long schedutil_cpu_util(int cpu, unsigned long util_cfs,
 	 * frequency will be gracefully reduced with the utilization decay.
 	 */
 	util = util_cfs + cpu_util_rt(rq);
-	if (type == FREQUENCY_UTIL)
+	if (type == FREQUENCY_UTIL)//计算频率要考虑人为对频率的控制
 		util = uclamp_rq_util_with(rq, util, p);
 
 	dl_util = cpu_util_dl(rq);
@@ -257,7 +263,7 @@ unsigned long schedutil_cpu_util(int cpu, unsigned long util_cfs,
 	 * NOTE: numerical errors or stop class might cause us to not quite hit
 	 * saturation when we should -- something for later.
 	 */
-	if (util + dl_util >= max)
+	if (util + dl_util >= max) //疑问：这里的dl_util是不是小于后面cpu_bw_dl()算出来的util？
 		return max;
 
 	/*
