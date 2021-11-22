@@ -174,7 +174,7 @@ static unsigned int get_next_freq(struct sugov_policy *sg_policy,
 	unsigned int freq = arch_scale_freq_invariant() ?
 				policy->cpuinfo.max_freq : policy->cur;
 	unsigned long next_freq = 0;
-
+	/* 提供了vendor hook，允许vendor根据需要调整freq的控制策略 */
 	trace_android_vh_map_util_freq(util, freq, max, &next_freq);
 	if (next_freq)
 		freq = next_freq;

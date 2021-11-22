@@ -480,9 +480,6 @@ static void find_matching_se(struct sched_entity **se, struct sched_entity **pse
 }
 #endif	/* CONFIG_FAIR_GROUP_SCHED */
 
-static __always_inline
-void account_cfs_rq_runtime(struct cfs_rq *cfs_rq, u64 delta_exec);
-
 /**************************************************************
  * Scheduling class tree data structure manipulation methods:
  */
@@ -849,7 +846,6 @@ static void update_curr(struct cfs_rq *cfs_rq)
 		cgroup_account_cputime(curtask, delta_exec); //疑问：cgrp相关代码，可能是更新cgrp的cputime等信息，后续check
 		account_group_exec_runtime(curtask, delta_exec);
 	}
-	account_cfs_rq_runtime(cfs_rq, delta_exec); //CFS_BANDWIDTH未开时是空函数，忽略。
 }
 /*
  * 每个调度类都需要实现sched_class->update_curr这个成员函数。
@@ -1119,6 +1115,11 @@ account_entity_dequeue(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	*ptr -= min_t(typeof(*ptr), *ptr, _val);		\
 } while (0)
 
+/*
+ * 接下来是4个工具函数，用来在enqueue/dequeue se时更新cfs_rq的runnable_load/load
+ * 还是要注意cfs_rq的*_sum包含了load，而se的*_sum仅仅包含时间贡献！！！
+ */
+
 static inline void
 enqueue_runnable_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
@@ -1155,6 +1156,8 @@ dequeue_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *se)
 static void reweight_entity(struct cfs_rq *cfs_rq, struct sched_entity *se,
 			    unsigned long weight, unsigned long runnable)
 {
+	/* step1：先将se的load从cfs_rq上移除 */
+	/* step1.1：如果se处于runnable状态(即se->on_rq==1)，需要移除runnable load */
 	if (se->on_rq) {
 		/* commit outstanding execution time */
 		if (cfs_rq->curr == se)
@@ -1162,21 +1165,25 @@ static void reweight_entity(struct cfs_rq *cfs_rq, struct sched_entity *se,
 		account_entity_dequeue(cfs_rq, se);
 		dequeue_runnable_load_avg(cfs_rq, se);
 	}
+	/* step1.2：load与是否runnable无关，所以都是需要移除的 */
 	dequeue_load_avg(cfs_rq, se);
-
+	/* step2：更新se的runnable_weight和load weight */
 	se->runnable_weight = runnable;
 	update_load_set(&se->load, weight);
 
 #ifdef CONFIG_SMP
+	/* step3：因为step2里更新了se的runnable_weith和load weight，
+	 * 所以这里要进一步更新与之相关的se->avg.load_avg和runnable_load_avg.
+	 */
 	do {
-		u32 divider = LOAD_AVG_MAX - 1024 + se->avg.period_contrib;
+		u32 divider = LOAD_AVG_MAX - 1024 + se->avg.period_contrib; //do-while(0)是为了这个局部变量？
 
 		se->avg.load_avg = div_u64(se_weight(se) * se->avg.load_sum, divider);
 		se->avg.runnable_load_avg =
 			div_u64(se_runnable(se) * se->avg.runnable_load_sum, divider);
 	} while (0);
 #endif
-
+	/* step4: 重新将se的load添加回cfs_rq */
 	enqueue_load_avg(cfs_rq, se);
 	if (se->on_rq) {
 		account_entity_enqueue(cfs_rq, se);
@@ -1189,9 +1196,14 @@ void reweight_task(struct task_struct *p, int prio)
 	struct sched_entity *se = &p->se;
 	struct cfs_rq *cfs_rq = cfs_rq_of(se);
 	struct load_weight *load = &se->load;
+	/* 应该是修改了task的prio，所以要查表更新weight */
 	unsigned long weight = scale_load(sched_prio_to_weight[prio]);
 
+	/* task se的load.weight和runnable_weight是一样的。
+	 * 在reweight_entity()里更新task的se->load.weight = se->runnable_weight = weight
+	 */
 	reweight_entity(cfs_rq, se, weight, weight);
+	/* task se的load->weight更新了，相应的inv_weight也需要查表更新 */
 	load->inv_weight = sched_prio_to_wmult[prio];
 }
 
@@ -1349,8 +1361,6 @@ static long calc_group_runnable(struct cfs_rq *cfs_rq, long shares)
 }
 #endif /* CONFIG_SMP */
 
-static inline int throttled_hierarchy(struct cfs_rq *cfs_rq);
-
 /*
  * Recomputes the group entity based on the current state of its group
  * runqueue.
@@ -1363,18 +1373,10 @@ static void update_cfs_group(struct sched_entity *se)
 	if (!gcfs_rq)
 		return;
 
-	if (throttled_hierarchy(gcfs_rq))
-		return;
-
 	shares   = calc_group_shares(gcfs_rq);
 	runnable = calc_group_runnable(gcfs_rq, shares);
 
 	reweight_entity(cfs_rq_of(se), se, shares, runnable);
-}
-
-#else /* CONFIG_FAIR_GROUP_SCHED */
-static inline void update_cfs_group(struct sched_entity *se)
-{
 }
 #endif /* CONFIG_FAIR_GROUP_SCHED */
 
@@ -2173,8 +2175,6 @@ place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int initial)
 	se->vruntime = max_vruntime(se->vruntime, vruntime);
 }
 
-static void check_enqueue_throttle(struct cfs_rq *cfs_rq);
-
 static inline void check_schedstat_required(void)
 {
 #ifdef CONFIG_SCHEDSTATS
@@ -2194,8 +2194,6 @@ static inline void check_schedstat_required(void)
 	}
 #endif
 }
-
-static inline bool cfs_bandwidth_used(void);
 
 /*
  * MIGRATION
@@ -2280,11 +2278,8 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	 * because of a parent been throttled but cfs->nr_running > 1. Try to
 	 * add it unconditionnally.
 	 */
-	if (cfs_rq->nr_running == 1 || cfs_bandwidth_used())
-		list_add_leaf_cfs_rq(cfs_rq);
-
 	if (cfs_rq->nr_running == 1)
-		check_enqueue_throttle(cfs_rq);
+		list_add_leaf_cfs_rq(cfs_rq);
 }
 
 static void __clear_buddies_last(struct sched_entity *se)
@@ -2332,8 +2327,6 @@ static void clear_buddies(struct cfs_rq *cfs_rq, struct sched_entity *se)
 		__clear_buddies_skip(se);
 }
 
-static __always_inline void return_cfs_rq_runtime(struct cfs_rq *cfs_rq);
-
 static void
 dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 {
@@ -2370,9 +2363,6 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	 */
 	if (!(flags & DEQUEUE_SLEEP))
 		se->vruntime -= cfs_rq->min_vruntime;
-
-	/* return excess runtime on last dequeue */
-	return_cfs_rq_runtime(cfs_rq);
 
 	update_cfs_group(se);
 
@@ -2520,8 +2510,6 @@ pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 	return se;
 }
 
-static bool check_cfs_rq_runtime(struct cfs_rq *cfs_rq);
-
 static void put_prev_entity(struct cfs_rq *cfs_rq, struct sched_entity *prev)
 {
 	/*
@@ -2530,9 +2518,6 @@ static void put_prev_entity(struct cfs_rq *cfs_rq, struct sched_entity *prev)
 	 */
 	if (prev->on_rq)
 		update_curr(cfs_rq);
-
-	/* throttle cfs_rqs exceeding runtime */
-	check_cfs_rq_runtime(cfs_rq);
 
 	check_spread(cfs_rq, prev);
 
@@ -2580,53 +2565,6 @@ entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr, int queued)
 	if (cfs_rq->nr_running > 1)
 		check_preempt_tick(cfs_rq, curr);
 }
-
-
-/**************************************************
- * CFS bandwidth control machinery
- * android没有开启CFS bandwidth，暂时删掉这部分代码……
- */
-
-static inline bool cfs_bandwidth_used(void)
-{
-	return false;
-}
-
-static void account_cfs_rq_runtime(struct cfs_rq *cfs_rq, u64 delta_exec) {}
-static bool check_cfs_rq_runtime(struct cfs_rq *cfs_rq) { return false; }
-static void check_enqueue_throttle(struct cfs_rq *cfs_rq) {}
-static inline void sync_throttle(struct task_group *tg, int cpu) {}
-static __always_inline void return_cfs_rq_runtime(struct cfs_rq *cfs_rq) {}
-
-static inline int cfs_rq_throttled(struct cfs_rq *cfs_rq)
-{
-	return 0;
-}
-
-static inline int throttled_hierarchy(struct cfs_rq *cfs_rq)
-{
-	return 0;
-}
-
-static inline int throttled_lb_pair(struct task_group *tg,
-				    int src_cpu, int dest_cpu)
-{
-	return 0;
-}
-
-void init_cfs_bandwidth(struct cfs_bandwidth *cfs_b) {}
-
-#ifdef CONFIG_FAIR_GROUP_SCHED
-static void init_cfs_rq_runtime(struct cfs_rq *cfs_rq) {}
-#endif
-
-static inline struct cfs_bandwidth *tg_cfs_bandwidth(struct task_group *tg)
-{
-	return NULL;
-}
-static inline void destroy_cfs_bandwidth(struct cfs_bandwidth *cfs_b) {}
-static inline void update_runtime_enabled(struct rq *rq) {}
-static inline void unthrottle_offline_cfs_rqs(struct rq *rq) {}
 
 /**************************************************
  * CFS operations on tasks:
@@ -2737,10 +2675,6 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 		cfs_rq->h_nr_running++;
 		cfs_rq->idle_h_nr_running += idle_h_nr_running;
 
-		/* end evaluation on encountering a throttled cfs_rq */
-		if (cfs_rq_throttled(cfs_rq))
-			goto enqueue_throttle;
-
 		flags = ENQUEUE_WAKEUP;
 	}
 
@@ -2752,17 +2686,6 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 
 		cfs_rq->h_nr_running++;
 		cfs_rq->idle_h_nr_running += idle_h_nr_running;
-
-		/* end evaluation on encountering a throttled cfs_rq */
-		if (cfs_rq_throttled(cfs_rq))
-			goto enqueue_throttle;
-
-               /*
-                * One parent has been throttled and cfs_rq removed from the
-                * list. Add it back to not break the leaf list.
-                */
-               if (throttled_hierarchy(cfs_rq))
-                       list_add_leaf_cfs_rq(cfs_rq);
 	}
 
 enqueue_throttle:
@@ -2785,21 +2708,6 @@ enqueue_throttle:
 		if (!task_new)
 			update_overutilized_status(rq);
 
-	}
-
-	if (cfs_bandwidth_used()) {
-		/*
-		 * When bandwidth control is enabled; the cfs_rq_throttled()
-		 * breaks in the above iteration can result in incomplete
-		 * leaf list maintenance, resulting in triggering the assertion
-		 * below.
-		 */
-		for_each_sched_entity(se) {
-			cfs_rq = cfs_rq_of(se);
-
-			if (list_add_leaf_cfs_rq(cfs_rq))
-				break;
-		}
 	}
 
 	assert_list_leaf_cfs_rq(rq);
@@ -2828,10 +2736,6 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 		cfs_rq->h_nr_running--;
 		cfs_rq->idle_h_nr_running -= idle_h_nr_running;
 
-		/* end evaluation on encountering a throttled cfs_rq */
-		if (cfs_rq_throttled(cfs_rq))
-			goto dequeue_throttle;
-
 		/* Don't dequeue parent if it has other entities besides us */
 		if (cfs_rq->load.weight) {
 			/* Avoid re-evaluating load for this entity: */
@@ -2840,7 +2744,7 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 			 * Bias pick_next to pick a task from this cfs_rq, as
 			 * p is sleeping when it is within its sched_slice.
 			 */
-			if (task_sleep && se && !throttled_hierarchy(cfs_rq))
+			if (task_sleep && se)
 				set_next_buddy(se);
 			break;
 		}
@@ -2855,11 +2759,6 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 
 		cfs_rq->h_nr_running--;
 		cfs_rq->idle_h_nr_running -= idle_h_nr_running;
-
-		/* end evaluation on encountering a throttled cfs_rq */
-		if (cfs_rq_throttled(cfs_rq))
-			goto dequeue_throttle;
-
 	}
 
 dequeue_throttle:
@@ -4311,15 +4210,6 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 	if (unlikely(se == pse))
 		return;
 
-	/*
-	 * This is possible from callers such as attach_tasks(), in which we
-	 * unconditionally check_prempt_curr() after an enqueue (which may have
-	 * lead to a throttle).  This both saves work and prevents false
-	 * next-buddy nomination below.
-	 */
-	if (unlikely(throttled_hierarchy(cfs_rq_of(pse))))
-		return;
-
 	if (sched_feat(NEXT_BUDDY) && scale && !(wake_flags & WF_FORK)) {
 		set_next_buddy(pse);
 		next_buddy_marked = 1;
@@ -4421,21 +4311,6 @@ again:
 				update_curr(cfs_rq);
 			else
 				curr = NULL;
-
-			/*
-			 * This call to check_cfs_rq_runtime() will do the
-			 * throttle and dequeue its entity in the parent(s).
-			 * Therefore the nr_running test will indeed
-			 * be correct.
-			 */
-			if (unlikely(check_cfs_rq_runtime(cfs_rq))) {
-				cfs_rq = &rq->cfs;
-
-				if (!cfs_rq->nr_running)
-					goto idle;
-
-				goto simple;
-			}
 		}
 
 		se = pick_next_entity(cfs_rq, curr);
@@ -4582,7 +4457,7 @@ static bool yield_to_task_fair(struct rq *rq, struct task_struct *p, bool preemp
 	struct sched_entity *se = &p->se;
 
 	/* throttled hierarchies are not runnable */
-	if (!se->on_rq || throttled_hierarchy(cfs_rq_of(se)))
+	if (!se->on_rq)
 		return false;
 
 	/* Tell the scheduler that we'd really like pse to run next. */
@@ -4809,16 +4684,6 @@ int can_migrate_task(struct task_struct *p, struct lb_env *env)
 
 	trace_android_rvh_can_migrate_task(p, env->dst_cpu, &can_migrate);
 	if (!can_migrate)
-		return 0;
-
-	/*
-	 * We do not migrate tasks that are:
-	 * 1) throttled_lb_pair, or
-	 * 2) cannot be migrated to this CPU due to cpus_ptr, or
-	 * 3) running (obviously), or
-	 * 4) are cache-hot on their current CPU.
-	 */
-	if (throttled_lb_pair(task_group(p), env->src_cpu, env->dst_cpu))
 		return 0;
 
 	/* Disregard pcpu kthreads; they are where they need to be. */
@@ -7573,16 +7438,11 @@ void trigger_load_balance(struct rq *rq)
 static void rq_online_fair(struct rq *rq)
 {
 	update_sysctl();
-
-	update_runtime_enabled(rq);
 }
 
 static void rq_offline_fair(struct rq *rq)
 {
 	update_sysctl();
-
-	/* Ensure any throttled groups are reachable by pick_next_task */
-	unthrottle_offline_cfs_rqs(rq);
 }
 
 #endif /* CONFIG_SMP */
@@ -7710,19 +7570,14 @@ static void propagate_entity_cfs_rq(struct sched_entity *se)
 
 	for_each_sched_entity(se) {
 		cfs_rq = cfs_rq_of(se);
-
-		if (!cfs_rq_throttled(cfs_rq)){
-			update_load_avg(cfs_rq, se, UPDATE_TG);
-			list_add_leaf_cfs_rq(cfs_rq);
-			continue;
-		}
+		update_load_avg(cfs_rq, se, UPDATE_TG);
+		list_add_leaf_cfs_rq(cfs_rq);
+		continue;
 
 		if (list_add_leaf_cfs_rq(cfs_rq))
 			break;
 	}
 }
-#else
-static void propagate_entity_cfs_rq(struct sched_entity *se) { }
 #endif
 
 static void detach_entity_cfs_rq(struct sched_entity *se)
@@ -7828,8 +7683,6 @@ static void set_next_task_fair(struct rq *rq, struct task_struct *p, bool first)
 		struct cfs_rq *cfs_rq = cfs_rq_of(se);
 
 		set_next_entity(cfs_rq, se);
-		/* ensure bandwidth has been allocated on our new cfs_rq */
-		account_cfs_rq_runtime(cfs_rq, 0);
 	}
 }
 
@@ -7883,8 +7736,6 @@ void free_fair_sched_group(struct task_group *tg)
 {
 	int i;
 
-	destroy_cfs_bandwidth(tg_cfs_bandwidth(tg));
-
 	for_each_possible_cpu(i) {
 		if (tg->cfs_rq)
 			kfree(tg->cfs_rq[i]);
@@ -7910,8 +7761,6 @@ int alloc_fair_sched_group(struct task_group *tg, struct task_group *parent)
 		goto err;
 
 	tg->shares = NICE_0_LOAD;
-
-	init_cfs_bandwidth(tg_cfs_bandwidth(tg));
 
 	for_each_possible_cpu(i) {
 		cfs_rq = kzalloc_node(sizeof(struct cfs_rq),
@@ -7950,7 +7799,6 @@ void online_fair_sched_group(struct task_group *tg)
 		rq_lock_irq(rq, &rf);
 		update_rq_clock(rq);
 		attach_entity_cfs_rq(se);
-		sync_throttle(tg, i);
 		rq_unlock_irq(rq, &rf);
 	}
 }
@@ -7988,7 +7836,6 @@ void init_tg_cfs_entry(struct task_group *tg, struct cfs_rq *cfs_rq,
 
 	cfs_rq->tg = tg;
 	cfs_rq->rq = rq;
-	init_cfs_rq_runtime(cfs_rq);
 
 	tg->cfs_rq[cpu] = cfs_rq;
 	tg->se[cpu] = se;

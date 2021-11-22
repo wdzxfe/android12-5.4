@@ -6746,26 +6746,6 @@ void __init sched_init(void)
 		root_task_group.shares = ROOT_TASK_GROUP_LOAD;
 		INIT_LIST_HEAD(&rq->leaf_cfs_rq_list);
 		rq->tmp_alone_branch = &rq->leaf_cfs_rq_list;
-		/*
-		 * How much CPU bandwidth does root_task_group get?
-		 *
-		 * In case of task-groups formed thr' the cgroup filesystem, it
-		 * gets 100% of the CPU resources in the system. This overall
-		 * system CPU resource is divided among the tasks of
-		 * root_task_group and its child task-groups in a fair manner,
-		 * based on each entity's (task or task-group's) weight
-		 * (se->load.weight).
-		 *
-		 * In other words, if root_task_group has 10 tasks of weight
-		 * 1024) and two child groups A0 and A1 (of weight 1024 each),
-		 * then A0's share of the CPU resource is:
-		 *
-		 *	A0's bandwidth = 1024 / (10*1024 + 1024 + 1024) = 8.33%
-		 *
-		 * We achieve this by letting root_task_group's tasks sit
-		 * directly in rq->cfs (i.e root_task_group->se[] = NULL).
-		 */
-		init_cfs_bandwidth(&root_task_group.cfs_bandwidth);
 		init_tg_cfs_entry(&root_task_group, &rq->cfs, NULL, i, NULL);
 #endif /* CONFIG_FAIR_GROUP_SCHED */
 
@@ -7558,21 +7538,10 @@ static int tg_set_cfs_bandwidth(struct task_group *tg, u64 period, u64 quota)
 
 	runtime_enabled = quota != RUNTIME_INF;
 	runtime_was_enabled = cfs_b->quota != RUNTIME_INF;
-	/*
-	 * If we need to toggle cfs_bandwidth_used, off->on must occur
-	 * before making related changes, and on->off must occur afterwards
-	 */
-	if (runtime_enabled && !runtime_was_enabled)
-		cfs_bandwidth_usage_inc();
+
 	raw_spin_lock_irq(&cfs_b->lock);
 	cfs_b->period = ns_to_ktime(period);
 	cfs_b->quota = quota;
-
-	__refill_cfs_bandwidth_runtime(cfs_b);
-
-	/* Restart the period timer (if active) to handle new period expiry: */
-	if (runtime_enabled)
-		start_cfs_bandwidth(cfs_b);
 
 	raw_spin_unlock_irq(&cfs_b->lock);
 
@@ -7585,12 +7554,8 @@ static int tg_set_cfs_bandwidth(struct task_group *tg, u64 period, u64 quota)
 		cfs_rq->runtime_enabled = runtime_enabled;
 		cfs_rq->runtime_remaining = 0;
 
-		if (cfs_rq->throttled)
-			unthrottle_cfs_rq(cfs_rq);
 		rq_unlock_irq(rq, &rf);
 	}
-	if (runtime_was_enabled && !runtime_enabled)
-		cfs_bandwidth_usage_dec();
 out_unlock:
 	mutex_unlock(&cfs_constraints_mutex);
 	put_online_cpus();
