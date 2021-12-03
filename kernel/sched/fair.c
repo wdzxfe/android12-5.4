@@ -1710,17 +1710,6 @@ static inline bool skip_blocked_update(struct sched_entity *se)
 	return true;
 }
 
-#else /* CONFIG_FAIR_GROUP_SCHED */
-
-static inline void update_tg_load_avg(struct cfs_rq *cfs_rq, int force) {}
-
-static inline int propagate_entity_load_avg(struct sched_entity *se)
-{
-	return 0;
-}
-
-static inline void add_tg_cfs_propagate(struct cfs_rq *cfs_rq, long runnable_sum) {}
-
 #endif /* CONFIG_FAIR_GROUP_SCHED */
 
 /**
@@ -1729,7 +1718,7 @@ static inline void add_tg_cfs_propagate(struct cfs_rq *cfs_rq, long runnable_sum
  * @cfs_rq: cfs_rq to update
  *
  * The cfs_rq avg is the direct sum of all its entities (blocked and runnable)
- * avg. The immediate corollary is that all (fair) tasks must be attached, see
+ * avg. The immediate corollary(推论) is that all (fair) tasks must be attached, see
  * post_init_entity_util_avg().
  *
  * cfs_rq->avg is used for task_h_load() and update_cfs_share() for example.
@@ -1795,12 +1784,12 @@ static void attach_entity_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *s
 
 	/*
 	 * When we attach the @se to the @cfs_rq, we must align the decay
-	 * window because without that, really weird and wonderful things can
+	 * window because without that, really weird（奇怪的） and wonderful things can
 	 * happen.
 	 *
 	 * XXX illustrate
 	 */
-	se->avg.last_update_time = cfs_rq->avg.last_update_time;
+	se->avg.last_update_time = cfs_rq->avg.last_update_time;//疑问：这个是什么神操作？？？
 	se->avg.period_contrib = cfs_rq->avg.period_contrib;
 
 	/*
@@ -1817,7 +1806,7 @@ static void attach_entity_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *s
 			div_u64(se->avg.load_avg * se->avg.load_sum, se_weight(se));
 	}
 
-	se->avg.runnable_load_sum = se->avg.load_sum;
+	se->avg.runnable_load_sum = se->avg.load_sum;//疑问：这里对于task group se来说是不是变大了？
 
 	enqueue_load_avg(cfs_rq, se);
 	cfs_rq->avg.util_avg += se->avg.util_avg;
@@ -1825,7 +1814,7 @@ static void attach_entity_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *s
 
 	add_tg_cfs_propagate(cfs_rq, se->avg.load_sum);
 
-	cfs_rq_util_change(cfs_rq, flags);
+	cfs_rq_util_change(cfs_rq, flags);//cfs rq的load有变，要看下是否需要调整频率。
 
 	trace_pelt_cfs_tp(cfs_rq);
 }
@@ -1868,7 +1857,7 @@ static inline void update_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *s
 	 * Track task load average for carrying it to new CPU after migrated, and
 	 * track group sched_entity load average for task_h_load calc in migration
 	 */
-	if (se->avg.last_update_time && !(flags & SKIP_AGE_LOAD))
+	if (se->avg.last_update_time && !(flags & SKIP_AGE_LOAD))//一般不会设置SKIP_AGE_LOAD
 		__update_load_avg_se(now, cfs_rq, se);
 
 	decayed  = update_cfs_rq_load_avg(now, cfs_rq);
@@ -1879,11 +1868,11 @@ static inline void update_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *s
 		/*
 		 * DO_ATTACH means we're here from enqueue_entity().
 		 * !last_update_time means we've passed through
-		 * migrate_task_rq_fair() indicating we migrated.
+		 * migrate_task_rq_fair() indicating we migrated. wz:在migrate_task_rq_fair()里会置0.
 		 *
-		 * IOW we're enqueueing a task on a new CPU.
+		 * IOW(换句话说，in other words) we're enqueueing a task on a new CPU.
 		 */
-		attach_entity_load_avg(cfs_rq, se, SCHED_CPUFREQ_MIGRATION);
+		attach_entity_load_avg(cfs_rq, se, SCHED_CPUFREQ_MIGRATION);//这里会触发变频。
 		update_tg_load_avg(cfs_rq, 0);
 
 	} else if (decayed) {
